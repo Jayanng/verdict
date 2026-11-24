@@ -146,9 +146,9 @@ mod arbitratable_escrow {
         /// Execute a ruling: move the escrow's own vault per the ruling.
         /// Only the arbitrator component, only while frozen for this
         /// dispute, exactly once. Returns the payee's share as a bucket;
-        /// the remainder stays in the vault (the settlement matrix, which
-        /// routes the remainder, is built in the next phase). Conservation
-        /// is exact: payee bucket + vault remainder == funded total.
+        /// the remainder stays in the vault (the settlement matrix routes
+        /// the remainder). Conservation is exact: payee bucket + vault
+        /// remainder == funded total.
         pub fn execute_ruling(&mut self, dispute_id: u64, payee_amount: u64) -> Bucket {
             self.assert_arbitrator();
             assert!(self.frozen, "escrow is not frozen for a dispute");
