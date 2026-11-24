@@ -52,7 +52,10 @@ mod arbitratable_escrow {
 
     impl ArbitratableEscrow {
         /// Production form: ownerless, caller rule, in-method assert on.
-        pub fn new(arbitrator: ComponentAddress, payee: RistrettoPublicKeyBytes) -> Component<Self> {
+        pub fn new(
+            arbitrator: ComponentAddress,
+            payee: RistrettoPublicKeyBytes,
+        ) -> Component<Self> {
             Self::create(arbitrator, payee, OwnerRule::None, true, false)
         }
 
@@ -83,7 +86,10 @@ mod arbitratable_escrow {
             rules_open: bool,
         ) -> Component<Self> {
             let payer = CallerContext::transaction_signer_public_key();
-            assert!(payee != payer, "payee must differ from the payer (the creator)");
+            assert!(
+                payee != payer,
+                "payee must differ from the payer (the creator)"
+            );
             let state = Self {
                 arbitrator,
                 payer,
@@ -101,7 +107,10 @@ mod arbitratable_escrow {
                     .add_method_rule("freeze_for_dispute", rule!(caller_component(arbitrator)))
                     .add_method_rule("execute_ruling", rule!(caller_component(arbitrator)))
             };
-            Component::new(state).with_access_rules(rules).with_owner_rule(owner_rule).create()
+            Component::new(state)
+                .with_access_rules(rules)
+                .with_owner_rule(owner_rule)
+                .create()
         }
 
         /// Fund the escrow. Only the payer may fund.
@@ -114,7 +123,10 @@ mod arbitratable_escrow {
                 bucket.resource_address() == TARI_TOKEN,
                 "escrow is funded in TARI only"
             );
-            let amount = bucket.amount().to_u64_checked().expect("bucket amount out of range");
+            let amount = bucket
+                .amount()
+                .to_u64_checked()
+                .expect("bucket amount out of range");
             assert!(amount > 0, "funding bucket must not be empty");
             self.vault.deposit(bucket);
         }
@@ -123,7 +135,10 @@ mod arbitratable_escrow {
         pub fn freeze_for_dispute(&mut self, dispute_id: u64) {
             self.assert_arbitrator();
             assert!(!self.frozen, "escrow is already frozen for a dispute");
-            assert!(!self.ruling_executed, "a ruling has already executed on this escrow");
+            assert!(
+                !self.ruling_executed,
+                "a ruling has already executed on this escrow"
+            );
             self.frozen = true;
             self.frozen_dispute_id = dispute_id;
         }
@@ -137,10 +152,20 @@ mod arbitratable_escrow {
         pub fn execute_ruling(&mut self, dispute_id: u64, payee_amount: u64) -> Bucket {
             self.assert_arbitrator();
             assert!(self.frozen, "escrow is not frozen for a dispute");
-            assert_eq!(dispute_id, self.frozen_dispute_id, "dispute id does not match the frozen dispute");
+            assert_eq!(
+                dispute_id, self.frozen_dispute_id,
+                "dispute id does not match the frozen dispute"
+            );
             assert!(!self.ruling_executed, "ruling already executed");
-            let balance = self.vault.balance().to_u64_checked().expect("vault balance out of range");
-            assert!(payee_amount <= balance, "payee amount exceeds the vault balance");
+            let balance = self
+                .vault
+                .balance()
+                .to_u64_checked()
+                .expect("vault balance out of range");
+            assert!(
+                payee_amount <= balance,
+                "payee amount exceeds the vault balance"
+            );
             self.ruling_executed = true;
             self.frozen = false;
             self.vault.withdraw(Amount::from_u64(payee_amount))
@@ -176,9 +201,9 @@ mod arbitratable_escrow {
 
         fn assert_arbitrator(&self) {
             if self.assert_caller {
-                CallerContext::assert_badge_in_scope(
-                    &NonFungibleAddress::caller_component_badge(self.arbitrator),
-                );
+                CallerContext::assert_badge_in_scope(&NonFungibleAddress::caller_component_badge(
+                    self.arbitrator,
+                ));
             }
         }
     }

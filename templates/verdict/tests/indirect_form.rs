@@ -19,10 +19,10 @@ use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
 use tari_engine_types::virtual_substate::{VirtualSubstate, VirtualSubstateId};
 use tari_ootle_transaction::args;
 use tari_template_lib::types::{
-    Amount, ComponentAddress, Hash32, NonFungibleAddress, constants::TARI_TOKEN,
-    crypto::RistrettoPublicKeyBytes,
+    constants::TARI_TOKEN, crypto::RistrettoPublicKeyBytes, Amount, ComponentAddress, Hash32,
+    NonFungibleAddress,
 };
-use tari_template_test_tooling::{TemplateTest, support::assert_error::assert_reject_reason};
+use tari_template_test_tooling::{support::assert_error::assert_reject_reason, TemplateTest};
 
 const TOTAL: u64 = 500_000;
 const PAYEE_SHARE: u64 = 300_000;
@@ -39,7 +39,12 @@ struct Party {
 impl Party {
     fn create(test: &mut TemplateTest) -> Self {
         let (account, proof, secret, public_key) = test.create_funded_account_with_keypair();
-        Self { account, proof, secret, public_key }
+        Self {
+            account,
+            proof,
+            secret,
+            public_key,
+        }
     }
 
     fn pk_bytes(&self) -> RistrettoPublicKeyBytes {
@@ -59,13 +64,18 @@ struct Setup {
 fn new_test() -> TemplateTest {
     // Cargo runs tests with CWD = the verdict package dir, so the workspace
     // root is ../.. and both template crates load from there.
-    TemplateTest::new("../..", ["templates/verdict", "templates/arbitratable-escrow"])
+    TemplateTest::new(
+        "../..",
+        ["templates/verdict", "templates/arbitratable-escrow"],
+    )
 }
 
 fn create_verdict(test: &mut TemplateTest, signer: &RistrettoSecretKey) -> ComponentAddress {
     let template = test.get_template_address("Verdict");
     test.execute_expect_success(
-        test.transaction().call_function(template, "new", args![]).build_and_seal(signer),
+        test.transaction()
+            .call_function(template, "new", args![])
+            .build_and_seal(signer),
         vec![],
     );
     test.expect_return(0)
@@ -99,13 +109,26 @@ fn make_setup(ctor: &str) -> Setup {
     let payer_secret = payer.secret.clone();
     let verdict = create_verdict(&mut test, &payer_secret);
     let escrow = create_escrow(&mut test, ctor, verdict, payee.pk_bytes(), &payer_secret);
-    Setup { test, verdict, escrow, payer, payee, stranger }
+    Setup {
+        test,
+        verdict,
+        escrow,
+        payer,
+        payee,
+        stranger,
+    }
 }
 
 fn balance(test: &mut TemplateTest, party: &Party) -> u64 {
-    let amount: Amount =
-        test.call_method(party.account, "balance", args![TARI_TOKEN], vec![party.proof.clone()]);
-    amount.to_u64_checked().expect("account balance out of range")
+    let amount: Amount = test.call_method(
+        party.account,
+        "balance",
+        args![TARI_TOKEN],
+        vec![party.proof.clone()],
+    );
+    amount
+        .to_u64_checked()
+        .expect("account balance out of range")
 }
 
 fn vault_balance(test: &mut TemplateTest, escrow: ComponentAddress) -> u64 {
@@ -160,14 +183,21 @@ fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64, payee
         setup
             .test
             .transaction()
-            .call_method(verdict, "settle", args![dispute_id, payee_amount, payee_account])
+            .call_method(
+                verdict,
+                "settle",
+                args![dispute_id, payee_amount, payee_account],
+            )
             .build_and_seal(signer),
         vec![],
     );
 }
 
 fn set_epoch(test: &mut TemplateTest, epoch: u64) {
-    test.set_virtual_substate(VirtualSubstateId::CurrentEpoch, VirtualSubstate::CurrentEpoch(epoch));
+    test.set_virtual_substate(
+        VirtualSubstateId::CurrentEpoch,
+        VirtualSubstate::CurrentEpoch(epoch),
+    );
 }
 
 fn set_epoch_hash(test: &mut TemplateTest, hash: Hash32) {
@@ -195,22 +225,33 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
 
     let dispute_id = open_dispute(&mut setup, &payer_secret);
     assert_eq!(dispute_id, 0);
-    let frozen: bool = setup.test.call_method(setup.escrow, "is_frozen", args![], vec![]);
-    assert!(frozen, "open_dispute must freeze the escrow via its own method");
+    let frozen: bool = setup
+        .test
+        .call_method(setup.escrow, "is_frozen", args![], vec![]);
+    assert!(
+        frozen,
+        "open_dispute must freeze the escrow via its own method"
+    );
 
     settle(&mut setup, &payer_secret, dispute_id, PAYEE_SHARE);
 
     // Exactly the ruling amount moved to the payee; the remainder stays in
     // the vault until the settlement matrix routes it. Conservation is
     // exact: payee gain + vault remainder == funded total.
-    assert_eq!(balance(&mut setup.test, &setup.payee), payee_before + PAYEE_SHARE);
+    assert_eq!(
+        balance(&mut setup.test, &setup.payee),
+        payee_before + PAYEE_SHARE
+    );
     assert_eq!(balance(&mut setup.test, &setup.payer), payer_before - TOTAL);
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), PAYER_SHARE);
-    let executed: bool =
-        setup.test.call_method(setup.escrow, "ruling_executed", args![], vec![]);
+    let executed: bool = setup
+        .test
+        .call_method(setup.escrow, "ruling_executed", args![], vec![]);
     assert!(executed);
     let settled: bool =
-        setup.test.call_method(setup.verdict, "dispute_settled", args![dispute_id], vec![]);
+        setup
+            .test
+            .call_method(setup.verdict, "dispute_settled", args![dispute_id], vec![]);
     assert!(settled);
 
     // Second settle of the same dispute must fail: the ruling executes once.
@@ -220,13 +261,20 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
         setup
             .test
             .transaction()
-            .call_method(verdict, "settle", args![dispute_id, PAYEE_SHARE, payee_account])
+            .call_method(
+                verdict,
+                "settle",
+                args![dispute_id, PAYEE_SHARE, payee_account],
+            )
             .build_and_seal(&payer_secret),
         vec![],
     );
     assert_reject_reason(&reason, "already settled");
     // Nothing moved on the failed second settle.
-    assert_eq!(balance(&mut setup.test, &setup.payee), payee_before + PAYEE_SHARE);
+    assert_eq!(
+        balance(&mut setup.test, &setup.payee),
+        payee_before + PAYEE_SHARE
+    );
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), PAYER_SHARE);
 }
 
@@ -251,7 +299,10 @@ fn stranger_direct_call_rejected_by_access_rule() {
         vec![],
     );
     eprintln!("rule-layer freeze reject reason: {reason}");
-    assert_reject_reason(&reason, "Access Denied: call component method 'freeze_for_dispute'");
+    assert_reject_reason(
+        &reason,
+        "Access Denied: call component method 'freeze_for_dispute'",
+    );
 
     // Direct execute_ruling by a stranger: same rule, same rejection.
     let reason = setup.test.execute_expect_failure(
@@ -263,10 +314,15 @@ fn stranger_direct_call_rejected_by_access_rule() {
         vec![],
     );
     eprintln!("rule-layer ruling reject reason: {reason}");
-    assert_reject_reason(&reason, "Access Denied: call component method 'execute_ruling'");
+    assert_reject_reason(
+        &reason,
+        "Access Denied: call component method 'execute_ruling'",
+    );
 
     // The escrow is untouched: never frozen, vault intact.
-    let frozen: bool = setup.test.call_method(setup.escrow, "is_frozen", args![], vec![]);
+    let frozen: bool = setup
+        .test
+        .call_method(setup.escrow, "is_frozen", args![], vec![]);
     assert!(!frozen);
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), TOTAL);
 
@@ -280,7 +336,10 @@ fn stranger_direct_call_rejected_by_access_rule() {
             .build_and_seal(&payer_secret),
         vec![],
     );
-    assert_reject_reason(&reason, "Access Denied: call component method 'freeze_for_dispute'");
+    assert_reject_reason(
+        &reason,
+        "Access Denied: call component method 'freeze_for_dispute'",
+    );
 }
 
 #[test]
@@ -308,11 +367,15 @@ fn stranger_direct_call_rejected_by_in_method_assert() {
     // rules are wide open and only the assert stands.
     assert_reject_reason(&reason, "does not carry the badge");
     assert!(
-        !reason.to_string().contains("Access Denied: call component method"),
+        !reason
+            .to_string()
+            .contains("Access Denied: call component method"),
         "rule-open twin must not fail on an access rule, got: {reason}"
     );
 
-    let frozen: bool = setup.test.call_method(setup.escrow, "is_frozen", args![], vec![]);
+    let frozen: bool = setup
+        .test
+        .call_method(setup.escrow, "is_frozen", args![], vec![]);
     assert!(!frozen);
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), TOTAL);
 }
@@ -339,7 +402,9 @@ fn owned_twin_owner_bypasses_caller_rule() {
             .build_and_seal(&payer_secret),
         vec![],
     );
-    let frozen: bool = setup.test.call_method(setup.escrow, "is_frozen", args![], vec![]);
+    let frozen: bool = setup
+        .test
+        .call_method(setup.escrow, "is_frozen", args![], vec![]);
     assert!(frozen, "owner bypass must let the owner freeze directly");
 
     // Owner executes the ruling directly, routing the returned payee
@@ -355,12 +420,16 @@ fn owned_twin_owner_bypasses_caller_rule() {
             .build_and_seal(&payer_secret),
         vec![],
     );
-    assert_eq!(balance(&mut setup.test, &setup.payee), payee_before + PAYEE_SHARE);
+    assert_eq!(
+        balance(&mut setup.test, &setup.payee),
+        payee_before + PAYEE_SHARE
+    );
     assert_eq!(balance(&mut setup.test, &setup.payer), payer_before - TOTAL);
     // The remainder stays in the vault until the settlement matrix routes it.
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), PAYER_SHARE);
-    let executed: bool =
-        setup.test.call_method(setup.escrow, "ruling_executed", args![], vec![]);
+    let executed: bool = setup
+        .test
+        .call_method(setup.escrow, "ruling_executed", args![], vec![]);
     assert!(executed);
 }
 
@@ -382,7 +451,9 @@ fn ownerless_twin_refuses_same_direct_call() {
         vec![],
     );
     assert_reject_reason(&reason, "Access");
-    let frozen: bool = setup.test.call_method(setup.escrow, "is_frozen", args![], vec![]);
+    let frozen: bool = setup
+        .test
+        .call_method(setup.escrow, "is_frozen", args![], vec![]);
     assert!(!frozen);
 }
 
@@ -425,12 +496,19 @@ fn future_epoch_draw_commitment_enforced() {
     // opening hash (the predictable current one) is recorded.
     set_epoch_hash(&mut setup.test, hash_of(0x01));
     let dispute_id = open_dispute(&mut setup, &payer_secret);
-    let draw_epoch: u64 =
-        setup.test.call_method(setup.verdict, "dispute_draw_epoch", args![dispute_id], vec![]);
+    let draw_epoch: u64 = setup.test.call_method(
+        setup.verdict,
+        "dispute_draw_epoch",
+        args![dispute_id],
+        vec![],
+    );
     assert_eq!(draw_epoch, 2);
-    let open_hash: Hash32 = setup
-        .test
-        .call_method(setup.verdict, "dispute_open_epoch_hash", args![dispute_id], vec![]);
+    let open_hash: Hash32 = setup.test.call_method(
+        setup.verdict,
+        "dispute_open_epoch_hash",
+        args![dispute_id],
+        vec![],
+    );
     assert_eq!(open_hash, hash_of(0x01));
 
     // Draw before E* fails: epoch 0, then epoch 1.
@@ -452,10 +530,16 @@ fn future_epoch_draw_commitment_enforced() {
     // unknowable) hash in-template.
     set_epoch(&mut setup.test, 2);
     set_epoch_hash(&mut setup.test, hash_of(0xE2));
-    let drawn: Hash32 = setup.test.call_method(verdict, "draw_jury", args![dispute_id], vec![]);
+    let drawn: Hash32 = setup
+        .test
+        .call_method(verdict, "draw_jury", args![dispute_id], vec![]);
     assert_eq!(drawn, hash_of(0xE2));
-    let stored: Hash32 =
-        setup.test.call_method(setup.verdict, "dispute_draw_hash", args![dispute_id], vec![]);
+    let stored: Hash32 = setup.test.call_method(
+        setup.verdict,
+        "dispute_draw_hash",
+        args![dispute_id],
+        vec![],
+    );
     assert_eq!(stored, hash_of(0xE2));
 
     // Second draw in the same epoch fails: one draw per dispute.
@@ -473,11 +557,19 @@ fn future_epoch_draw_commitment_enforced() {
     // epoch 4; drawing it at epoch 3 (before E*) fails, proving the
     // window is per-dispute. One escrow holds one dispute.
     let payee_pk = setup.payee.pk_bytes();
-    let escrow2 = create_escrow(&mut setup.test, "new", setup.verdict, payee_pk, &payer_secret);
+    let escrow2 = create_escrow(
+        &mut setup.test,
+        "new",
+        setup.verdict,
+        payee_pk,
+        &payer_secret,
+    );
     fund_on(&mut setup, escrow2, TOTAL);
     let dispute2 = open_dispute_on(&mut setup, escrow2, &payer_secret);
     let draw_epoch2: u64 =
-        setup.test.call_method(setup.verdict, "dispute_draw_epoch", args![dispute2], vec![]);
+        setup
+            .test
+            .call_method(setup.verdict, "dispute_draw_epoch", args![dispute2], vec![]);
     assert_eq!(draw_epoch2, 4);
     set_epoch(&mut setup.test, 3);
     let reason = setup.test.execute_expect_failure(

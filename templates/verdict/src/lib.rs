@@ -39,10 +39,12 @@ mod verdict {
 
     impl Verdict {
         pub fn new() -> Component<Self> {
-            Component::new(Self { disputes: Vec::new() })
-                .with_access_rules(AccessRules::allow_all())
-                .with_owner_rule(OwnerRule::None)
-                .create()
+            Component::new(Self {
+                disputes: Vec::new(),
+            })
+            .with_access_rules(AccessRules::allow_all())
+            .with_owner_rule(OwnerRule::None)
+            .create()
         }
 
         /// Open a dispute: freeze the escrow via its own method, and lock
@@ -53,8 +55,7 @@ mod verdict {
             let dispute_id = self.disputes.len() as u64;
             let open_epoch = Consensus::current_epoch();
             let open_epoch_hash = Consensus::current_epoch_hash();
-            ComponentManager::get(escrow)
-                .invoke("freeze_for_dispute", args![dispute_id]);
+            ComponentManager::get(escrow).invoke("freeze_for_dispute", args![dispute_id]);
             self.disputes.push(Dispute {
                 escrow,
                 open_epoch,
@@ -100,8 +101,8 @@ mod verdict {
                 dispute.settled = true;
                 dispute.escrow
             };
-            let payee_bucket: Bucket =
-                ComponentManager::get(escrow).call("execute_ruling", args![dispute_id, payee_amount]);
+            let payee_bucket: Bucket = ComponentManager::get(escrow)
+                .call("execute_ruling", args![dispute_id, payee_amount]);
             ComponentManager::get(payee_account).invoke("deposit", args![payee_bucket]);
         }
 
@@ -143,11 +144,15 @@ mod verdict {
         // ----- helpers -----
 
         fn dispute(&self, dispute_id: u64) -> &Dispute {
-            self.disputes.get(dispute_id as usize).expect("dispute id out of range")
+            self.disputes
+                .get(dispute_id as usize)
+                .expect("dispute id out of range")
         }
 
         fn dispute_mut(&mut self, dispute_id: u64) -> &mut Dispute {
-            self.disputes.get_mut(dispute_id as usize).expect("dispute id out of range")
+            self.disputes
+                .get_mut(dispute_id as usize)
+                .expect("dispute id out of range")
         }
     }
 }
