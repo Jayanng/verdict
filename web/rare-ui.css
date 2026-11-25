@@ -1,0 +1,202 @@
+/* Rare UI component layer for the Verdict web app.
+ *
+ * This file holds the component styles only: buttons, pills, cards, badges,
+ * forms, tables, the ticker, and the accordion. It is kept separate from
+ * styles.css, which holds the brand tokens and page layout, so a library
+ * upgrade can never overwrite brand rules. Load this file after styles.css.
+ *
+ * Note on the library: Rare UI (https://rareui.com) is a copy-paste React
+ * component registry, not a published stylesheet, so no Rare UI code is
+ * vendored here. These component styles are written for this app in the
+ * approved design language. The footer carries the attribution link the
+ * Rare UI license asks for, and adopting Rare UI components is a defined
+ * follow-up for the React move.
+ */
+
+.rui-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 13px 26px;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  background: var(--blue);
+  color: #ffffff;
+  transition: background 0.25s ease, transform 0.15s ease;
+}
+.rui-btn:hover { background: #0012c8; }
+.rui-btn:active { transform: translateY(1px); }
+.rui-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.rui-btn-ghost {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+.rui-btn-ghost:hover { background: var(--card); border-color: var(--blue); color: var(--blue); }
+
+.rui-btn-sm { font-size: 13px; padding: 9px 18px; }
+
+.rui-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  white-space: nowrap;
+}
+.rui-pill.green { background: rgba(31, 157, 99, 0.10); color: var(--green); }
+.rui-pill.red { background: rgba(214, 69, 69, 0.10); color: var(--red); }
+.rui-pill.amber { background: rgba(185, 127, 0, 0.10); color: var(--amber); }
+.rui-pill.grey { background: var(--bg); color: var(--muted); }
+
+.rui-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 28px;
+  box-shadow: 0 8px 28px rgba(17, 17, 17, 0.05);
+}
+
+.rui-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-bottom: 8px;
+}
+.rui-field .hint { font-weight: 400; color: var(--muted); }
+.rui-input,
+.rui-textarea,
+.rui-select {
+  display: block;
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--ink);
+}
+.rui-textarea { font-family: var(--mono); font-size: 13px; resize: vertical; word-break: break-all; }
+.rui-input:focus,
+.rui-textarea:focus,
+.rui-select:focus { outline: none; border-color: var(--blue); }
+.rui-input.mono { font-family: var(--mono); font-size: 13px; }
+
+.rui-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.rui-table th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.rui-table td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.rui-table tr:last-child td { border-bottom: none; }
+
+.rui-ticker {
+  overflow: hidden;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+  padding: 12px 0;
+  white-space: nowrap;
+}
+.rui-ticker-track {
+  display: inline-block;
+  animation: rui-ticker-scroll 36s linear infinite;
+}
+.rui-ticker-track span {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-right: 48px;
+}
+.rui-ticker-track span b { color: var(--green); font-weight: 700; margin-right: 8px; }
+@keyframes rui-ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.rui-accordion-item { border-bottom: 1px solid var(--line); }
+.rui-accordion-item:last-child { border-bottom: none; }
+.rui-accordion-q {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 20px 22px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 600;
+  background: none;
+  border: none;
+  text-align: left;
+  color: var(--ink);
+}
+.rui-accordion-q .pm { font-size: 20px; color: var(--muted); font-weight: 400; flex: none; transition: transform 0.35s ease; }
+.rui-accordion-item.open .rui-accordion-q .pm { transform: rotate(45deg); }
+.rui-accordion-a { max-height: 0; overflow: hidden; transition: max-height 0.5s cubic-bezier(0.22, 1, 0.36, 1); }
+.rui-accordion-a p { margin: 0; padding: 0 22px 20px; font-size: 14px; color: var(--ink-2); line-height: 1.65; }
+.rui-accordion-item.open .rui-accordion-a { max-height: 300px; }
+
+.rui-steps { display: flex; gap: 8px; margin-bottom: 24px; }
+.rui-step {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 10px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  text-align: center;
+}
+.rui-step.active { background: var(--blue); border-color: var(--blue); color: #ffffff; }
+.rui-step.done { background: var(--blue-soft); border-color: var(--blue); color: var(--blue); }
+
+.rui-check {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.rui-check:last-child { border-bottom: none; }
+.rui-check .mark {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  background: var(--bg);
+  color: var(--muted);
+}
+.rui-check.pass .mark { background: rgba(31, 157, 99, 0.12); color: var(--green); }
+.rui-check.fail .mark { background: rgba(214, 69, 69, 0.12); color: var(--red); }
+.rui-check .body { min-width: 0; flex: 1; }
+.rui-check .body .t { font-weight: 600; }
+.rui-check .body .d { color: var(--ink-2); }
+.rui-check .body .mono { font-family: var(--mono); font-size: 12px; word-break: break-all; color: var(--ink-2); }
