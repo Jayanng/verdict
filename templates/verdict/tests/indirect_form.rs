@@ -28,6 +28,8 @@ const TOTAL: u64 = 500_000;
 const PAYEE_SHARE: u64 = 300_000;
 const PAYER_SHARE: u64 = TOTAL - PAYEE_SHARE;
 const DRAW_DELAY: u64 = 2;
+const MILESTONE_AMOUNTS: [u64; 2] = [200_000, 300_000];
+const DEADLINE: u64 = 100;
 
 struct Party {
     account: ComponentAddress,
@@ -64,10 +66,7 @@ struct Setup {
 fn new_test() -> TemplateTest {
     // Cargo runs tests with CWD = the verdict package dir, so the workspace
     // root is ../.. and both template crates load from there.
-    TemplateTest::new(
-        "../..",
-        ["templates/verdict", "templates/arbitratable-escrow"],
-    )
+    TemplateTest::new("../..", ["templates/verdict", "templates/milestone-escrow"])
 }
 
 fn create_verdict(test: &mut TemplateTest, signer: &RistrettoSecretKey) -> ComponentAddress {
@@ -91,10 +90,14 @@ fn create_escrow(
     payee_pk: RistrettoPublicKeyBytes,
     creator: &RistrettoSecretKey,
 ) -> ComponentAddress {
-    let template = test.get_template_address("ArbitratableEscrow");
+    let template = test.get_template_address("MilestoneEscrow");
     test.execute_expect_success(
         test.transaction()
-            .call_function(template, ctor, args![arbitrator, payee_pk])
+            .call_function(
+                template,
+                ctor,
+                args![arbitrator, payee_pk, MILESTONE_AMOUNTS.to_vec(), DEADLINE],
+            )
             .build_and_seal(creator),
         vec![],
     );
@@ -179,6 +182,7 @@ fn open_dispute_on(
 fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64, payee_amount: u64) {
     let verdict = setup.verdict;
     let payee_account = setup.payee.account;
+    let payer_account = setup.payer.account;
     setup.test.execute_expect_success(
         setup
             .test
@@ -186,7 +190,7 @@ fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64, payee
             .call_method(
                 verdict,
                 "settle",
-                args![dispute_id, payee_amount, payee_account],
+                args![dispute_id, payee_amount, payee_account, payer_account],
             )
             .build_and_seal(signer),
         vec![],
@@ -235,15 +239,18 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
 
     settle(&mut setup, &payer_secret, dispute_id, PAYEE_SHARE);
 
-    // Exactly the ruling amount moved to the payee; the remainder stays in
-    // the vault until the settlement matrix routes it. Conservation is
-    // exact: payee gain + vault remainder == funded total.
+    // Exactly the ruling amount moved to the payee, and the remainder went
+    // straight back to the payer. Conservation is exact: payee gain +
+    // payer refund + vault remainder (zero) == funded total.
     assert_eq!(
         balance(&mut setup.test, &setup.payee),
         payee_before + PAYEE_SHARE
     );
-    assert_eq!(balance(&mut setup.test, &setup.payer), payer_before - TOTAL);
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), PAYER_SHARE);
+    assert_eq!(
+        balance(&mut setup.test, &setup.payer),
+        payer_before - TOTAL + PAYER_SHARE
+    );
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
     let executed: bool = setup
         .test
         .call_method(setup.escrow, "ruling_executed", args![], vec![]);
@@ -257,6 +264,7 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
     // Second settle of the same dispute must fail: the ruling executes once.
     let verdict = setup.verdict;
     let payee_account = setup.payee.account;
+    let payer_account = setup.payer.account;
     let reason = setup.test.execute_expect_failure(
         setup
             .test
@@ -264,7 +272,7 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
             .call_method(
                 verdict,
                 "settle",
-                args![dispute_id, PAYEE_SHARE, payee_account],
+                args![dispute_id, PAYEE_SHARE, payee_account, payer_account],
             )
             .build_and_seal(&payer_secret),
         vec![],
@@ -275,7 +283,7 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
         balance(&mut setup.test, &setup.payee),
         payee_before + PAYEE_SHARE
     );
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), PAYER_SHARE);
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
 }
 
 // ----- (b) stranger rejection, both layers -----
@@ -425,7 +433,8 @@ fn owned_twin_owner_bypasses_caller_rule() {
         payee_before + PAYEE_SHARE
     );
     assert_eq!(balance(&mut setup.test, &setup.payer), payer_before - TOTAL);
-    // The remainder stays in the vault until the settlement matrix routes it.
+    // Direct execute_ruling moves only the payee share; the remainder
+    // stays in the vault until withdraw_remainder routes it to the payer.
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), PAYER_SHARE);
     let executed: bool = setup
         .test

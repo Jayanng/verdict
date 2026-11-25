@@ -11,7 +11,8 @@ Verdict is an entry in the Tari November Build Contest, theme MVP.
 | Artifact | What it is |
 |---|---|
 | `templates/verdict` | The ownerless court: juror pool (XTM bond), disputes, evidence hashes, future-epoch jury draw, commit-reveal voting, settlement, appeal, and fee ledger. |
-| `templates/arbitratable-escrow` | The reference adapter: a milestone escrow that ships with the court built in. Based on PieceWork, see the [fork](https://github.com/Jayanng/piecework). |
+| `templates/milestone-escrow` | A milestone escrow that ships with the court built in: the client funds milestone amounts, the freelancer marks each delivered, the client approves, and approval releases exactly that milestone's slice. |
+| `templates/payment-escrow` | A single-payment escrow that ships with the court built in: one amount, one delivery, the payer approves to release, the deadline refunds. |
 | `web/` | Landing page and app: walletless simulation and the live path via Sapient, with dispute proof pages. |
 
 ## How it works

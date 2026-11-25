@@ -1,9 +1,9 @@
 [package]
-name = "arbitratable-escrow"
+name = "milestone-escrow"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Arbitratable escrow: the Verdict reference adapter, based on PieceWork"
+description = "MilestoneEscrow: a milestone escrow that ships with the Verdict court built in"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

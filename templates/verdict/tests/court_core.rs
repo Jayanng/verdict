@@ -20,6 +20,8 @@ use tari_template_test_tooling::{
 
 const TOTAL: u64 = 500_000;
 const DRAW_DELAY: u64 = 2;
+const MILESTONE_AMOUNTS: [u64; 2] = [200_000, 300_000];
+const DEADLINE: u64 = 100;
 
 const VOTE_PAY: u64 = 0;
 const VOTE_REFUND: u64 = 1;
@@ -59,10 +61,7 @@ struct Setup {
 }
 
 fn new_test() -> TemplateTest {
-    TemplateTest::new(
-        "../..",
-        ["templates/verdict", "templates/arbitratable-escrow"],
-    )
+    TemplateTest::new("../..", ["templates/verdict", "templates/milestone-escrow"])
 }
 
 fn create_verdict(test: &mut TemplateTest, signer: &RistrettoSecretKey) -> ComponentAddress {
@@ -82,10 +81,14 @@ fn create_escrow(
     payee_pk: RistrettoPublicKeyBytes,
     creator: &RistrettoSecretKey,
 ) -> ComponentAddress {
-    let template = test.get_template_address("ArbitratableEscrow");
+    let template = test.get_template_address("MilestoneEscrow");
     test.execute_expect_success(
         test.transaction()
-            .call_function(template, "new", args![arbitrator, payee_pk])
+            .call_function(
+                template,
+                "new",
+                args![arbitrator, payee_pk, MILESTONE_AMOUNTS.to_vec(), DEADLINE],
+            )
             .build_and_seal(creator),
         vec![],
     );

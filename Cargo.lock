@@ -62,19 +62,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 
 [[package]]
-name = "arbitratable-escrow"
-version = "0.1.0"
-dependencies = [
- "ootle_byte_type",
- "tari_crypto",
- "tari_engine_types",
- "tari_ootle_common_types",
- "tari_ootle_transaction",
- "tari_template_lib",
- "tari_template_test_tooling",
-]
-
-[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1719,6 +1706,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "milestone-escrow"
+version = "0.1.0"
+dependencies = [
+ "ootle_byte_type",
+ "tari_crypto",
+ "tari_engine_types",
+ "tari_ootle_common_types",
+ "tari_ootle_transaction",
+ "tari_template_lib",
+ "tari_template_test_tooling",
+]
+
+[[package]]
 name = "minicbor"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1968,6 +1968,19 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "payment-escrow"
+version = "0.1.0"
+dependencies = [
+ "ootle_byte_type",
+ "tari_crypto",
+ "tari_engine_types",
+ "tari_ootle_common_types",
+ "tari_ootle_transaction",
+ "tari_template_lib",
+ "tari_template_test_tooling",
+]
 
 [[package]]
 name = "percent-encoding"
