@@ -279,7 +279,7 @@ fn is_complete(setup: &mut Setup) -> bool {
 // ----- constructor -----
 
 #[test]
-fn constructor_rejects_zero_amount() {
+fn constructor_rejects_non_positive_amount() {
     let mut test = new_test();
     let payer = Party::create(&mut test);
     let payee = Party::create(&mut test);
@@ -296,7 +296,7 @@ fn constructor_rejects_zero_amount() {
             .build_and_seal(&payer_secret),
         vec![],
     );
-    assert_reject_reason(&reason, "greater than zero");
+    assert_reject_reason(&reason, "must be positive");
 }
 
 #[test]

@@ -199,7 +199,7 @@ mod milestone_escrow {
             let mut total: u64 = 0;
             let mut milestones: Vec<Milestone> = Vec::new();
             for amount in milestone_amounts {
-                assert!(amount > 0, "milestone amount must be greater than zero");
+                assert!(amount > 0, "milestone amount must be positive");
                 total = total
                     .checked_add(amount)
                     .expect("milestone amounts overflow the total");

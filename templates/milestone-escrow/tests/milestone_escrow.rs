@@ -307,7 +307,7 @@ fn constructor_rejects_empty_milestones() {
 }
 
 #[test]
-fn constructor_rejects_zero_milestone_amount() {
+fn constructor_rejects_non_positive_milestone_amount() {
     let mut test = new_test();
     let payer = Party::create(&mut test);
     let payee = Party::create(&mut test);
@@ -324,7 +324,7 @@ fn constructor_rejects_zero_milestone_amount() {
             .build_and_seal(&payer_secret),
         vec![],
     );
-    assert_reject_reason(&reason, "greater than zero");
+    assert_reject_reason(&reason, "must be positive");
 }
 
 #[test]

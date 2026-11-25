@@ -183,7 +183,7 @@ mod payment_escrow {
                 payee != payer,
                 "payee must differ from the payer (the creator)"
             );
-            assert!(amount > 0, "payment amount must be greater than zero");
+            assert!(amount > 0, "payment amount must be positive");
             assert!(
                 deadline > Consensus::current_epoch(),
                 "deadline must be after the current epoch"

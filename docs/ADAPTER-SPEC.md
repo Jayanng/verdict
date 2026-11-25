@@ -22,7 +22,7 @@ execute_ruling(dispute_id, payee_amount)
   once, per the ruling, and returns the payee's share as a bucket. The
   remainder stays in the vault, and the settlement matrix routes it. The
   ruling outcomes map to the payee amount: pay means the payee amount is
-  the ruled share, refund means the payee amount is zero, split means the
+  the ruled share, refund means the payee amount is not positive, split means the
   payee amount is the payee's ruled share. The payee amount must never
   exceed the vault balance, and the ruling executes at most once for a
   dispute. See [SETTLEMENT.md](SETTLEMENT.md) for the outcomes and the
@@ -41,7 +41,7 @@ court at creation, and no one can swap in a different court later.
 The constructor also takes the deal itself: for a milestone escrow, the
 milestone amounts and the deadline epoch; for a single-payment escrow, the
 payment amount and the deadline epoch. The constructor rejects a deal with
-no milestones, a zero amount, a milestone total that overflows, a payee
+no milestones, a non-positive amount, a milestone total that overflows, a payee
 who is the payer, and a deadline that is not after the creation epoch.
 
 ## Gating
