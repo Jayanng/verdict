@@ -15,6 +15,7 @@
 // run against the real engine. No network is involved.
 
 use ootle_byte_type::ToByteType;
+use sha2::{Digest, Sha256};
 use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
 use tari_engine_types::virtual_substate::{VirtualSubstate, VirtualSubstateId};
 use tari_ootle_transaction::args;
@@ -30,6 +31,10 @@ const PAYER_SHARE: u64 = TOTAL - PAYEE_SHARE;
 const DRAW_DELAY: u64 = 2;
 const MILESTONE_AMOUNTS: [u64; 2] = [200_000, 300_000];
 const DEADLINE: u64 = 100;
+const JUROR_FEE: u64 = 5_000;
+const BOND_FLOOR: u64 = 30_000;
+const VOTE_PAY: u64 = 0;
+const VOTE_REFUND: u64 = 1;
 
 struct Party {
     account: ComponentAddress,
@@ -179,7 +184,7 @@ fn open_dispute_on(
     setup.test.expect_return(0)
 }
 
-fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64, payee_amount: u64) {
+fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64) {
     let verdict = setup.verdict;
     let payee_account = setup.payee.account;
     let payer_account = setup.payer.account;
@@ -190,11 +195,110 @@ fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64, payee
             .call_method(
                 verdict,
                 "settle",
-                args![dispute_id, payee_amount, payee_account, payer_account],
+                args![dispute_id, payee_account, payer_account],
             )
             .build_and_seal(signer),
         vec![],
     );
+}
+
+fn register_juror(setup: &mut Setup, juror: &Party, amount: u64) {
+    let verdict = setup.verdict;
+    let juror_account = juror.account;
+    let juror_secret = juror.secret.clone();
+    let juror_proof = juror.proof.clone();
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(juror_account, "withdraw", args![TARI_TOKEN, amount])
+            .put_last_instruction_output_on_workspace("bond")
+            .call_method(verdict, "register_juror", args![Workspace("bond")])
+            .build_and_seal(&juror_secret),
+        vec![juror_proof],
+    );
+}
+
+/// The vote commitment, computed the same way the template does:
+/// SHA-256 of (vote, salt, dispute id, juror), concatenated in order.
+fn vote_commitment(
+    vote: u64,
+    salt: Hash32,
+    dispute_id: u64,
+    juror: RistrettoPublicKeyBytes,
+) -> Hash32 {
+    let mut hasher = Sha256::new();
+    hasher.update(vote.to_le_bytes());
+    hasher.update(salt.as_ref());
+    hasher.update(dispute_id.to_le_bytes());
+    hasher.update(juror.as_ref());
+    let out = hasher.finalize();
+    Hash32::from(<[u8; 32]>::try_from(out.as_slice()).expect("sha256 output is 32 bytes"))
+}
+
+/// Register `count` jurors at the bond floor and return them.
+fn register_jurors(setup: &mut Setup, count: usize) -> Vec<Party> {
+    let jurors: Vec<Party> = (0..count).map(|_| Party::create(&mut setup.test)).collect();
+    for juror in &jurors {
+        register_juror(setup, juror, BOND_FLOOR);
+    }
+    jurors
+}
+
+/// Draw the panel and rule the dispute with the given votes, one per
+/// panel juror in panel order. The jurors must already be registered,
+/// and the dispute must already be open, so the frozen pool holds them.
+fn rule_dispute(setup: &mut Setup, jurors: &[Party], dispute_id: u64, votes: [u64; 3]) {
+    set_epoch(&mut setup.test, DRAW_DELAY);
+    set_epoch_hash(&mut setup.test, hash_of(0xE2));
+    let payer_secret = setup.payer.secret.clone();
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(setup.verdict, "draw_jury", args![dispute_id])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    let panel: Vec<RistrettoPublicKeyBytes> = (0..3)
+        .map(|i| {
+            setup.test.call_method(
+                setup.verdict,
+                "dispute_panel_member",
+                args![dispute_id, i],
+                vec![],
+            )
+        })
+        .collect();
+    for (i, key) in panel.iter().enumerate() {
+        let juror = jurors
+            .iter()
+            .find(|j| j.pk_bytes() == *key)
+            .expect("drawn juror not found");
+        let juror_secret = juror.secret.clone();
+        let salt = hash_of((i + 1) as u8);
+        let commitment = vote_commitment(votes[i], salt, dispute_id, *key);
+        setup.test.execute_expect_success(
+            setup
+                .test
+                .transaction()
+                .call_method(setup.verdict, "commit_vote", args![dispute_id, commitment])
+                .build_and_seal(&juror_secret),
+            vec![],
+        );
+        setup.test.execute_expect_success(
+            setup
+                .test
+                .transaction()
+                .call_method(
+                    setup.verdict,
+                    "reveal_vote",
+                    args![dispute_id, votes[i], salt],
+                )
+                .build_and_seal(&juror_secret),
+            vec![],
+        );
+    }
 }
 
 fn set_epoch(test: &mut TemplateTest, epoch: u64) {
@@ -227,6 +331,7 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
     fund(&mut setup, TOTAL);
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), TOTAL);
 
+    let jurors = register_jurors(&mut setup, 3);
     let dispute_id = open_dispute(&mut setup, &payer_secret);
     assert_eq!(dispute_id, 0);
     let frozen: bool = setup
@@ -237,19 +342,27 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
         "open_dispute must freeze the escrow via its own method"
     );
 
-    settle(&mut setup, &payer_secret, dispute_id, PAYEE_SHARE);
+    // Two jurors rule pay, one rules refund: the ruling is pay, the two
+    // majority jurors are owed one fee each from the principal, and the
+    // payer keeps nothing. The amount is derived from the votes, never
+    // supplied by the caller.
+    rule_dispute(
+        &mut setup,
+        &jurors,
+        dispute_id,
+        [VOTE_PAY, VOTE_PAY, VOTE_REFUND],
+    );
+    settle(&mut setup, &payer_secret, dispute_id);
 
-    // Exactly the ruling amount moved to the payee, and the remainder went
-    // straight back to the payer. Conservation is exact: payee gain +
-    // payer refund + vault remainder (zero) == funded total.
+    // Exactly the ruled amount moved to the payee, the juror fees stayed
+    // in the court's fee vault, and nothing is left in the escrow vault.
+    // Conservation is exact: payee gain + juror fees + payer refund
+    // (zero) == funded total.
     assert_eq!(
         balance(&mut setup.test, &setup.payee),
-        payee_before + PAYEE_SHARE
+        payee_before + TOTAL - 2 * JUROR_FEE
     );
-    assert_eq!(
-        balance(&mut setup.test, &setup.payer),
-        payer_before - TOTAL + PAYER_SHARE
-    );
+    assert_eq!(balance(&mut setup.test, &setup.payer), payer_before - TOTAL);
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
     let executed: bool = setup
         .test
@@ -272,7 +385,7 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
             .call_method(
                 verdict,
                 "settle",
-                args![dispute_id, PAYEE_SHARE, payee_account, payer_account],
+                args![dispute_id, payee_account, payer_account],
             )
             .build_and_seal(&payer_secret),
         vec![],
@@ -281,7 +394,7 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
     // Nothing moved on the failed second settle.
     assert_eq!(
         balance(&mut setup.test, &setup.payee),
-        payee_before + PAYEE_SHARE
+        payee_before + TOTAL - 2 * JUROR_FEE
     );
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
 }

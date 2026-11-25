@@ -18,6 +18,7 @@ tari_engine_types = "0.54"
 tari_ootle_common_types = "0.54"
 tari_crypto = "0.24"
 ootle_byte_type = { version = "0.21", features = ["crypto"] }
+sha2 = "0.10"
 
 [profile.release]
 opt-level = "s"
