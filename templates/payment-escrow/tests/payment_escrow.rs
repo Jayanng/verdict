@@ -186,9 +186,7 @@ fn approve(setup: &mut Setup) {
         setup
             .test
             .transaction()
-            .call_method(escrow, "approve", args![])
-            .put_last_instruction_output_on_workspace("released")
-            .call_method(payee_account, "deposit", args![Workspace("released")])
+            .call_method(escrow, "approve", args![payee_account])
             .build_and_seal(&payer_secret),
         vec![],
     );
@@ -243,6 +241,7 @@ fn open_dispute(setup: &mut Setup, signer: &RistrettoSecretKey) -> u64 {
 fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64, payee_amount: u64) {
     let verdict = setup.verdict;
     let payee_account = setup.payee.account;
+    let payer_account = setup.payer.account;
     setup.test.execute_expect_success(
         setup
             .test
@@ -250,7 +249,7 @@ fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64, payee
             .call_method(
                 verdict,
                 "settle",
-                args![dispute_id, payee_amount, payee_account],
+                args![dispute_id, payee_amount, payee_account, payer_account],
             )
             .build_and_seal(signer),
         vec![],
@@ -391,7 +390,8 @@ fn partial_funding_blocks_approval() {
     fund(&mut setup, 100_000);
     deliver(&mut setup);
     let payer_secret = setup.payer.secret.clone();
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
+    let payee_account = setup.payee.account;
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
     assert_reject_reason(&reason, "not funded");
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), 100_000);
 }
@@ -403,7 +403,8 @@ fn approve_before_delivery_fails() {
     let mut setup = make_setup("new");
     fund(&mut setup, AMOUNT);
     let payer_secret = setup.payer.secret.clone();
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
+    let payee_account = setup.payee.account;
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
     assert_reject_reason(&reason, "not delivered");
 }
 
@@ -413,7 +414,8 @@ fn approve_only_payer_can_approve() {
     fund(&mut setup, AMOUNT);
     deliver(&mut setup);
     let payee_secret = setup.payee.secret.clone();
-    let reason = call_expect_failure(&mut setup, &payee_secret, "approve", args![]);
+    let payee_account = setup.payee.account;
+    let reason = call_expect_failure(&mut setup, &payee_secret, "approve", args![payee_account]);
     assert_reject_reason(&reason, "only the payer can approve");
 }
 
@@ -458,7 +460,8 @@ fn second_approval_fails() {
     deliver(&mut setup);
     approve(&mut setup);
     let payer_secret = setup.payer.secret.clone();
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
+    let payee_account = setup.payee.account;
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
     assert_reject_reason(&reason, "already released");
 }
 
@@ -564,9 +567,10 @@ fn actions_after_cancel_fail() {
     cancel(&mut setup);
     let payer_secret = setup.payer.secret.clone();
     let payee_secret = setup.payee.secret.clone();
+    let payee_account = setup.payee.account;
     let reason = call_expect_failure(&mut setup, &payee_secret, "mark_delivered", args![]);
     assert_reject_reason(&reason, "cancelled");
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
     assert_reject_reason(&reason, "cancelled");
     let reason = call_expect_failure(&mut setup, &payer_secret, "refund", args![]);
     assert_reject_reason(&reason, "cancelled");
@@ -580,9 +584,10 @@ fn actions_after_refund_fail() {
     refund(&mut setup);
     let payer_secret = setup.payer.secret.clone();
     let payee_secret = setup.payee.secret.clone();
+    let payee_account = setup.payee.account;
     let reason = call_expect_failure(&mut setup, &payee_secret, "mark_delivered", args![]);
     assert_reject_reason(&reason, "refunded");
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
     assert_reject_reason(&reason, "refunded");
     let reason = call_expect_failure(&mut setup, &payer_secret, "cancel", args![]);
     assert_reject_reason(&reason, "refunded");
@@ -605,7 +610,8 @@ fn approve_after_deadline_fails() {
     deliver(&mut setup);
     set_epoch(&mut setup.test, DEADLINE);
     let payer_secret = setup.payer.secret.clone();
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
+    let payee_account = setup.payee.account;
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
     assert_reject_reason(&reason, "deadline");
 }
 
@@ -654,9 +660,10 @@ fn freeze_blocks_state_changes() {
     let payee_secret = setup.payee.secret.clone();
     open_dispute(&mut setup, &payer_secret);
     assert!(is_frozen(&mut setup));
+    let payee_account = setup.payee.account;
     let reason = call_expect_failure(&mut setup, &payee_secret, "mark_delivered", args![]);
     assert_reject_reason(&reason, "frozen");
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
     assert_reject_reason(&reason, "frozen");
     let reason = call_expect_failure(&mut setup, &payer_secret, "cancel", args![]);
     assert_reject_reason(&reason, "frozen");
@@ -673,12 +680,17 @@ fn adapter_freeze_and_execute_once() {
     let payee_before = balance(&mut setup.test, &setup.payee);
     let dispute_id = open_dispute(&mut setup, &payer_secret);
     assert!(is_frozen(&mut setup));
+    let payer_before = balance(&mut setup.test, &setup.payer);
     settle(&mut setup, &payer_secret, dispute_id, 300_000);
     assert_eq!(
         balance(&mut setup.test, &setup.payee),
         payee_before + 300_000
     );
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 200_000);
+    assert_eq!(
+        balance(&mut setup.test, &setup.payer),
+        payer_before + 200_000
+    );
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
     assert!(!is_frozen(&mut setup));
     let executed: bool = setup
         .test
@@ -686,6 +698,7 @@ fn adapter_freeze_and_execute_once() {
     assert!(executed);
     let verdict = setup.verdict;
     let payee_account = setup.payee.account;
+    let payer_account = setup.payer.account;
     let reason = setup.test.execute_expect_failure(
         setup
             .test
@@ -693,13 +706,13 @@ fn adapter_freeze_and_execute_once() {
             .call_method(
                 verdict,
                 "settle",
-                args![dispute_id, 300_000u64, payee_account],
+                args![dispute_id, 300_000u64, payee_account, payer_account],
             )
             .build_and_seal(&payer_secret),
         vec![],
     );
     assert_reject_reason(&reason, "already settled");
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 200_000);
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
 }
 
 #[test]
@@ -784,4 +797,127 @@ fn adapter_execute_wrong_dispute_id_fails() {
     );
     assert_reject_reason(&reason, "does not match");
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), AMOUNT);
+}
+
+#[test]
+fn adapter_full_refund_returns_everything_to_payer() {
+    let mut setup = make_setup("new");
+    fund(&mut setup, AMOUNT);
+    let payer_secret = setup.payer.secret.clone();
+    let payee_before = balance(&mut setup.test, &setup.payee);
+    let payer_before = balance(&mut setup.test, &setup.payer);
+    let dispute_id = open_dispute(&mut setup, &payer_secret);
+    settle(&mut setup, &payer_secret, dispute_id, 0);
+    assert_eq!(balance(&mut setup.test, &setup.payee), payee_before);
+    assert_eq!(
+        balance(&mut setup.test, &setup.payer),
+        payer_before + AMOUNT
+    );
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
+    let complete: bool = setup
+        .test
+        .call_method(setup.escrow, "is_complete", args![], vec![]);
+    assert!(complete);
+}
+
+#[test]
+fn adapter_withdraw_remainder_before_ruling_fails() {
+    let mut setup = make_setup("new_owned");
+    fund(&mut setup, AMOUNT);
+    let payer_secret = setup.payer.secret.clone();
+    let escrow = setup.escrow;
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(escrow, "withdraw_remainder", args![])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "no ruling has executed");
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), AMOUNT);
+}
+
+#[test]
+fn adapter_withdraw_remainder_twice_fails() {
+    let mut setup = make_setup("new_owned");
+    fund(&mut setup, AMOUNT);
+    let payer_secret = setup.payer.secret.clone();
+    let escrow = setup.escrow;
+    let payer_account = setup.payer.account;
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(escrow, "freeze_for_dispute", args![0u64])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(escrow, "execute_ruling", args![0u64, 300_000u64])
+            .put_last_instruction_output_on_workspace("ruling")
+            .call_method(setup.payee.account, "deposit", args![Workspace("ruling")])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(escrow, "withdraw_remainder", args![])
+            .put_last_instruction_output_on_workspace("remainder")
+            .call_method(payer_account, "deposit", args![Workspace("remainder")])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(escrow, "withdraw_remainder", args![])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "remainder already withdrawn");
+}
+
+#[test]
+fn adapter_freeze_empty_vault_fails() {
+    let mut setup = make_setup("new");
+    let payer_secret = setup.payer.secret.clone();
+    let verdict = setup.verdict;
+    let escrow = setup.escrow;
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "open_dispute", args![escrow, DRAW_DELAY])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "empty");
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
+}
+
+#[test]
+fn adapter_is_terminal_after_cancel_and_refund() {
+    let mut setup = make_setup("new");
+    fund(&mut setup, AMOUNT);
+    let terminal: bool = setup
+        .test
+        .call_method(setup.escrow, "is_terminal", args![], vec![]);
+    assert!(!terminal);
+    cancel(&mut setup);
+    let terminal: bool = setup
+        .test
+        .call_method(setup.escrow, "is_terminal", args![], vec![]);
+    assert!(terminal);
+    let complete: bool = setup
+        .test
+        .call_method(setup.escrow, "is_complete", args![], vec![]);
+    assert!(!complete);
 }

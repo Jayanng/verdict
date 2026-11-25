@@ -19,7 +19,9 @@
 //      bypass the rule.
 //
 // Verification constructors (used by the engine tests to isolate the
-// layers; the production build keeps only `new`):
+// layers). Test fixtures only: never create a live escrow holding real
+// funds with these. A live escrow always uses `new`, which is ownerless,
+// with the caller rule and the in-method assert on.
 //   - `new_owned`: OwnerRule::OwnedBySigner, caller rule, assert OFF. The
 //     owned twin: proves the owner bypasses the caller rule.
 //   - `new_rule_open`: OwnerRule::None, allow-all rules, assert ON. The
@@ -102,6 +104,10 @@ mod payment_escrow {
         frozen_dispute_id: u64,
         /// True once a ruling has executed. A ruling executes at most once.
         ruling_executed: bool,
+        /// True once the remainder has been withdrawn to the payer after a
+        /// ruling. Set by withdraw_remainder, so the remainder can move
+        /// exactly once and no funds stay locked in the vault.
+        remainder_withdrawn: bool,
         /// True once the payer has cancelled the agreement.
         cancelled: bool,
         /// True once the payer has refunded the unreleased amount.
@@ -202,6 +208,7 @@ mod payment_escrow {
                 frozen: false,
                 frozen_dispute_id: 0,
                 ruling_executed: false,
+                remainder_withdrawn: false,
                 cancelled: false,
                 refunded: false,
                 assert_caller,
@@ -212,6 +219,7 @@ mod payment_escrow {
                 AccessRules::allow_all()
                     .add_method_rule("freeze_for_dispute", rule!(caller_component(arbitrator)))
                     .add_method_rule("execute_ruling", rule!(caller_component(arbitrator)))
+                    .add_method_rule("withdraw_remainder", rule!(caller_component(arbitrator)))
             };
             Component::new(state)
                 .with_access_rules(rules)
@@ -265,9 +273,10 @@ mod payment_escrow {
 
         /// Approve the delivery. Only the payer may approve, before the
         /// deadline, while the agreement is open. Approval releases the
-        /// full payment amount to the payee as a bucket, and the payment
-        /// must be funded before it can move.
-        pub fn approve(&mut self) -> Bucket {
+        /// full payment amount to the payee's account, and the payment
+        /// must be funded before it can move. The escrow deposits the
+        /// amount itself, so the caller cannot misroute it.
+        pub fn approve(&mut self, payee_account: ComponentAddress) {
             self.assert_open();
             self.assert_before_deadline("approval is closed after the deadline");
             assert!(
@@ -283,7 +292,8 @@ mod payment_escrow {
                 .expect("vault balance out of range");
             assert!(self.amount <= balance, "payment is not funded yet");
             self.released = true;
-            self.vault.withdraw(Amount::from_u64(self.amount))
+            let bucket = self.vault.withdraw(Amount::from_u64(self.amount));
+            ComponentManager::get(payee_account).invoke("deposit", args![bucket]);
         }
 
         /// Cancel the agreement. Only the payer may cancel, before the
@@ -346,6 +356,12 @@ mod payment_escrow {
             assert!(!self.cancelled, "escrow is cancelled");
             assert!(!self.refunded, "escrow is refunded");
             assert!(!self.is_complete(), "payment is already released");
+            let balance = self
+                .vault
+                .balance()
+                .to_u64_checked()
+                .expect("vault balance out of range");
+            assert!(balance > 0, "escrow vault is empty, nothing to dispute");
             self.frozen = true;
             self.frozen_dispute_id = dispute_id;
         }
@@ -384,6 +400,25 @@ mod payment_escrow {
             self.vault.withdraw(Amount::from_u64(payee_amount))
         }
 
+        /// Withdraw the remainder to the payer after a ruling. Only the
+        /// arbitrator, only once, only after a ruling has executed. The
+        /// court calls this right after execute_ruling, so a split or a
+        /// refund never leaves funds locked in the vault. If the ruling
+        /// paid the full balance, the remainder is zero and this returns
+        /// an empty bucket.
+        pub fn withdraw_remainder(&mut self) -> Bucket {
+            self.assert_arbitrator();
+            assert!(self.ruling_executed, "no ruling has executed");
+            assert!(!self.remainder_withdrawn, "remainder already withdrawn");
+            self.remainder_withdrawn = true;
+            let balance = self
+                .vault
+                .balance()
+                .to_u64_checked()
+                .expect("vault balance out of range");
+            self.vault.withdraw(Amount::from_u64(balance))
+        }
+
         // ----- read-only getters -----
 
         pub fn arbitrator(&self) -> ComponentAddress {
@@ -419,7 +454,15 @@ mod payment_escrow {
         }
 
         pub fn is_complete(&self) -> bool {
-            self.released || self.ruled_amount == self.amount
+            self.released
+                || self.ruled_amount == self.amount
+                || (self.ruling_executed && self.remainder_withdrawn)
+        }
+
+        /// True once the escrow can no longer change state: completed,
+        /// ruled with the remainder withdrawn, cancelled, or refunded.
+        pub fn is_terminal(&self) -> bool {
+            self.is_complete() || self.cancelled || self.refunded
         }
 
         pub fn ruled_total(&self) -> u64 {

@@ -19,7 +19,9 @@
 //      bypass the rule.
 //
 // Verification constructors (used by the engine tests to isolate the
-// layers; the production build keeps only `new`):
+// layers). Test fixtures only: never create a live escrow holding real
+// funds with these. A live escrow always uses `new`, which is ownerless,
+// with the caller rule and the in-method assert on.
 //   - `new_owned`: OwnerRule::OwnedBySigner, caller rule, assert OFF. The
 //     owned twin: proves the owner bypasses the caller rule.
 //   - `new_rule_open`: OwnerRule::None, allow-all rules, assert ON. The
@@ -97,6 +99,10 @@ mod milestone_escrow {
         frozen_dispute_id: u64,
         /// True once a ruling has executed. A ruling executes at most once.
         ruling_executed: bool,
+        /// True once the remainder has been withdrawn to the payer after a
+        /// ruling. Set by withdraw_remainder, so the remainder can move
+        /// exactly once and no funds stay locked in the vault.
+        remainder_withdrawn: bool,
         /// True once the payer has cancelled the agreement.
         cancelled: bool,
         /// True once the payer has refunded the unreleased remainder.
@@ -222,6 +228,7 @@ mod milestone_escrow {
                 frozen: false,
                 frozen_dispute_id: 0,
                 ruling_executed: false,
+                remainder_withdrawn: false,
                 cancelled: false,
                 refunded: false,
                 assert_caller,
@@ -232,6 +239,7 @@ mod milestone_escrow {
                 AccessRules::allow_all()
                     .add_method_rule("freeze_for_dispute", rule!(caller_component(arbitrator)))
                     .add_method_rule("execute_ruling", rule!(caller_component(arbitrator)))
+                    .add_method_rule("withdraw_remainder", rule!(caller_component(arbitrator)))
             };
             Component::new(state)
                 .with_access_rules(rules)
@@ -286,9 +294,10 @@ mod milestone_escrow {
 
         /// Approve a delivered milestone. Only the payer may approve,
         /// before the deadline, while the agreement is open. Approval
-        /// releases exactly that milestone's slice to the payee as a
-        /// bucket, and the slice must be funded before it can move.
-        pub fn approve(&mut self, index: u64) -> Bucket {
+        /// releases exactly that milestone's slice to the payee's account,
+        /// and the slice must be funded before it can move. The escrow
+        /// deposits the slice itself, so the caller cannot misroute it.
+        pub fn approve(&mut self, index: u64, payee_account: ComponentAddress) {
             self.assert_open();
             self.assert_before_deadline("approval is closed after the deadline");
             assert!(
@@ -312,7 +321,8 @@ mod milestone_escrow {
                 .released
                 .checked_add(amount)
                 .expect("released total overflow");
-            self.vault.withdraw(Amount::from_u64(amount))
+            let bucket = self.vault.withdraw(Amount::from_u64(amount));
+            ComponentManager::get(payee_account).invoke("deposit", args![bucket]);
         }
 
         /// Cancel the agreement. Only the payer may cancel, before the
@@ -375,6 +385,12 @@ mod milestone_escrow {
             assert!(!self.cancelled, "escrow is cancelled");
             assert!(!self.refunded, "escrow is refunded");
             assert!(!self.is_complete(), "escrow is complete");
+            let balance = self
+                .vault
+                .balance()
+                .to_u64_checked()
+                .expect("vault balance out of range");
+            assert!(balance > 0, "escrow vault is empty, nothing to dispute");
             self.frozen = true;
             self.frozen_dispute_id = dispute_id;
         }
@@ -413,6 +429,25 @@ mod milestone_escrow {
             self.vault.withdraw(Amount::from_u64(payee_amount))
         }
 
+        /// Withdraw the remainder to the payer after a ruling. Only the
+        /// arbitrator, only once, only after a ruling has executed. The
+        /// court calls this right after execute_ruling, so a split or a
+        /// refund never leaves funds locked in the vault. If the ruling
+        /// paid the full balance, the remainder is zero and this returns
+        /// an empty bucket.
+        pub fn withdraw_remainder(&mut self) -> Bucket {
+            self.assert_arbitrator();
+            assert!(self.ruling_executed, "no ruling has executed");
+            assert!(!self.remainder_withdrawn, "remainder already withdrawn");
+            self.remainder_withdrawn = true;
+            let balance = self
+                .vault
+                .balance()
+                .to_u64_checked()
+                .expect("vault balance out of range");
+            self.vault.withdraw(Amount::from_u64(balance))
+        }
+
         // ----- read-only getters -----
 
         pub fn arbitrator(&self) -> ComponentAddress {
@@ -448,7 +483,13 @@ mod milestone_escrow {
         }
 
         pub fn is_complete(&self) -> bool {
-            self.released == self.total
+            self.released == self.total || (self.ruling_executed && self.remainder_withdrawn)
+        }
+
+        /// True once the escrow can no longer change state: completed,
+        /// ruled with the remainder withdrawn, cancelled, or refunded.
+        pub fn is_terminal(&self) -> bool {
+            self.is_complete() || self.cancelled || self.refunded
         }
 
         pub fn deadline(&self) -> u64 {

@@ -285,14 +285,17 @@ mod verdict {
         }
 
         /// Settle a dispute: order the ruling, the escrow executes it, and
-        /// the court routes the payee bucket the escrow returns. The court
-        /// never holds the money. Exactly once. The remainder stays in the
-        /// escrow vault until the settlement matrix routes it.
+        /// the court routes both buckets the escrow returns. The court
+        /// never holds the money. Exactly once. The payee bucket goes to
+        /// the payee account, and the remainder bucket goes straight to
+        /// the payer account, so a split or a refund never leaves funds
+        /// locked in the vault.
         pub fn settle(
             &mut self,
             dispute_id: u64,
             payee_amount: u64,
             payee_account: ComponentAddress,
+            payer_account: ComponentAddress,
         ) {
             let escrow = {
                 let dispute = self.dispute_mut(dispute_id);
@@ -303,6 +306,9 @@ mod verdict {
             let payee_bucket: Bucket = ComponentManager::get(escrow)
                 .call("execute_ruling", args![dispute_id, payee_amount]);
             ComponentManager::get(payee_account).invoke("deposit", args![payee_bucket]);
+            let remainder_bucket: Bucket =
+                ComponentManager::get(escrow).call("withdraw_remainder", args![]);
+            ComponentManager::get(payer_account).invoke("deposit", args![remainder_bucket]);
         }
 
         // ----- read-only getters -----
