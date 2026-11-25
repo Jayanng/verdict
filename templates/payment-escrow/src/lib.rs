@@ -146,7 +146,7 @@ mod payment_escrow {
                 deadline,
                 OwnerRule::OwnedBySigner,
                 false,
-                true,
+                false,
             )
         }
 

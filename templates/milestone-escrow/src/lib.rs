@@ -151,7 +151,7 @@ mod milestone_escrow {
                 deadline,
                 OwnerRule::OwnedBySigner,
                 false,
-                true,
+                false,
             )
         }
 
@@ -468,7 +468,7 @@ mod milestone_escrow {
         }
 
         pub fn milestone_count(&self) -> u64 {
-            self.milestones.len() as u64
+            u64::try_from(self.milestones.len()).expect("milestone count out of range")
         }
 
         pub fn milestone_amount(&self, index: u64) -> u64 {
@@ -487,13 +487,13 @@ mod milestone_escrow {
 
         fn milestone(&self, index: u64) -> &Milestone {
             self.milestones
-                .get(index as usize)
+                .get(usize::try_from(index).expect("milestone index out of range"))
                 .expect("milestone index out of range")
         }
 
         fn milestone_mut(&mut self, index: u64) -> &mut Milestone {
             self.milestones
-                .get_mut(index as usize)
+                .get_mut(usize::try_from(index).expect("milestone index out of range"))
                 .expect("milestone index out of range")
         }
 
