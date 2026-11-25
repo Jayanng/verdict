@@ -1,0 +1,224 @@
+// Verdict shared rules, mirrored from templates/verdict/src/lib.rs at ce96588.
+//
+// This module is pure logic with no DOM and no network. The browser app and
+// the Node test suite both import it, so the proof page recomputes exactly
+// what the template computes. No values here are chain data. Anything the
+// page shows as live must come from the indexer, which is not wired yet.
+
+export const PANEL_SIZE = 3;
+export const JUROR_FEE = 5000;
+export const BOND_FLOOR = 2 * JUROR_FEE * PANEL_SIZE;
+export const EVIDENCE_LIMIT = 3;
+
+export const VOTE_PAY = 0;
+export const VOTE_REFUND = 1;
+export const VOTE_SPLIT = 2;
+export const VOTE_REFUSE = 3;
+
+export const VOTE_LABELS = {
+  [VOTE_PAY]: "pay",
+  [VOTE_REFUND]: "refund",
+  [VOTE_SPLIT]: "split",
+  [VOTE_REFUSE]: "refuse to arbitrate",
+};
+
+export function hexToBytes(hex) {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0) throw new Error("hex string must have an even length");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+export function bytesToHex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export function u64ToLeBytes(value) {
+  const v = BigInt(value);
+  const out = new Uint8Array(8);
+  for (let i = 0; i < 8; i += 1) {
+    out[i] = Number((v >> BigInt(8 * i)) & 0xffn);
+  }
+  return out;
+}
+
+function concatBytes(parts) {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+// Pure JavaScript SHA-256, so the proof page can hash bytes in the browser
+// with no network and no dependency. Same output as any standard SHA-256.
+// Used by the page and checked against node:crypto in the test suite.
+const SHA_K = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+export function sha256Bytes(data) {
+  const bytes = data instanceof Uint8Array ? data : new TextEncoder().encode(data);
+  const bitLen = bytes.length * 8;
+  const paddedLength = (((bytes.length + 9 + 63) >> 6) << 6);
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLength - 4, bitLen >>> 0, false);
+  view.setUint32(paddedLength - 8, Math.floor(bitLen / 0x100000000), false);
+  let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+  let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+  const w = new Array(64);
+  for (let block = 0; block < paddedLength; block += 64) {
+    for (let i = 0; i < 16; i += 1) {
+      w[i] = view.getUint32(block + i * 4, false);
+    }
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = ((w[i - 15] >>> 7) | (w[i - 15] << 25)) ^ ((w[i - 15] >>> 18) | (w[i - 15] << 14)) ^ (w[i - 15] >>> 3);
+      const s1 = ((w[i - 2] >>> 17) | (w[i - 2] << 15)) ^ ((w[i - 2] >>> 19) | (w[i - 2] << 13)) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (let i = 0; i < 64; i += 1) {
+      const s1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + s1 + ch + SHA_K[i] + w[i]) | 0;
+      const s0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (s0 + maj) | 0;
+      h = g; g = f; f = e; e = (d + temp1) | 0; d = c; c = b; b = a; a = (temp1 + temp2) | 0;
+    }
+    h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0;
+    h4 = (h4 + e) | 0; h5 = (h5 + f) | 0; h6 = (h6 + g) | 0; h7 = (h7 + h) | 0;
+  }
+  const out = new Uint8Array(32);
+  const outView = new DataView(out.buffer);
+  [h0, h1, h2, h3, h4, h5, h6, h7].forEach((v, i) => outView.setUint32(i * 4, v, false));
+  return out;
+}
+
+export function sha256Hex(data) {
+  return bytesToHex(sha256Bytes(data));
+}
+
+// The vote commitment, exactly as the template builds it: SHA-256 of
+// (vote as little-endian u64, salt, dispute id as little-endian u64, juror
+// key), concatenated in that order. This function returns the bytes to hash,
+// the caller supplies the SHA-256 step, so the same code runs in the browser
+// (WebCrypto) and in Node (node:crypto).
+export function voteCommitmentBytes(vote, saltHex, disputeId, jurorHex) {
+  return concatBytes([
+    u64ToLeBytes(vote),
+    hexToBytes(saltHex),
+    u64ToLeBytes(disputeId),
+    hexToBytes(jurorHex),
+  ]);
+}
+
+// The panel derivation, exactly as the template derives it. For each slot,
+// read an 8-byte window of the draw hash, fold in the dispute id, the round,
+// and the slot, take the result modulo the pool size, and probe forward until
+// an unpicked juror is found. Returns the panel as pool indices, in order.
+// Arithmetic is BigInt so the 64-bit wrapping add matches the template.
+export function derivePanel(pool, drawHashHex, disputeId, round) {
+  const hashBytes = hexToBytes(drawHashHex);
+  if (hashBytes.length !== 32) throw new Error("draw hash must be 32 bytes");
+  const poolLen = pool.length;
+  if (poolLen === 0) return [];
+  const target = Math.min(PANEL_SIZE, poolLen);
+  const two64 = 1n << 64n;
+  const panel = [];
+  for (let slot = 0; slot < target; slot += 1) {
+    const offset = (slot * 8) % 32;
+    const window = new Uint8Array(8);
+    for (let i = 0; i < 8; i += 1) {
+      window[i] = hashBytes[(offset + i) % 32];
+    }
+    let value = 0n;
+    for (let i = 0; i < 8; i += 1) {
+      value |= BigInt(window[i]) << BigInt(8 * i);
+    }
+    const sum = (value + BigInt(disputeId) + BigInt(round) + BigInt(slot)) % two64;
+    let candidate = Number(sum % BigInt(poolLen));
+    while (panel.includes(candidate)) {
+      candidate = (candidate + 1) % poolLen;
+    }
+    panel.push(candidate);
+  }
+  return panel;
+}
+
+// Majority of the revealed votes. A majority needs more than half the panel.
+// Returns { vote, count } or { vote: null, count: 0 } when no vote holds a
+// majority, which is the tie case the appeal and fallback paths handle.
+export function majorityOutcome(reveals) {
+  const counts = new Map();
+  for (const vote of reveals) {
+    counts.set(vote, (counts.get(vote) || 0) + 1);
+  }
+  let best = null;
+  let bestCount = 0;
+  for (const [vote, count] of counts) {
+    if (count > bestCount) {
+      best = vote;
+      bestCount = count;
+    }
+  }
+  if (best !== null && bestCount * 2 > reveals.length) {
+    return { vote: best, count: bestCount };
+  }
+  return { vote: null, count: bestCount };
+}
+
+// Split a total across weights by largest remainder, so the parts always sum
+// to the total exactly, to the micro-Tari. Ties break toward the earlier part.
+export function splitLargestRemainder(total, weights) {
+  const weightSum = weights.reduce((sum, w) => sum + w, 0);
+  if (weightSum <= 0) throw new Error("weights must sum above zero");
+  const exact = weights.map((w) => (total * w) / weightSum);
+  const floors = exact.map((x) => Math.floor(x));
+  let assigned = floors.reduce((sum, x) => sum + x, 0);
+  const order = exact
+    .map((x, i) => ({ i, frac: x - Math.floor(x) }))
+    .sort((a, b) => b.frac - a.frac || a.i - b.i);
+  const out = [...floors];
+  let k = 0;
+  while (assigned < total) {
+    out[order[k % order.length].i] += 1;
+    assigned += 1;
+    k += 1;
+  }
+  return out;
+}
+
+// The escrow caller rule, as published: execute_ruling and
+// freeze_for_dispute accept calls from exactly one component, the court named
+// as arbitrator at creation, and the escrow is ownerless, so no owner path
+// can bypass it. This is a browser-side check of that published rule against
+// the published inputs, not a chain call.
+export function callerRuleCheck(callerAddress, arbitratorAddress) {
+  if (callerAddress === arbitratorAddress) {
+    return {
+      allowed: true,
+      reason: "caller is the court named as arbitrator at creation, so the caller-component rule accepts the call.",
+    };
+  }
+  return {
+    allowed: false,
+    reason: "caller is not the court named as arbitrator at creation, so the caller-component rule refuses the call, and the in-method assert refuses it too.",
+  };
+}
