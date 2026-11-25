@@ -28,6 +28,8 @@ const TOTAL: u64 = 500_000;
 const PAYEE_SHARE: u64 = 300_000;
 const PAYER_SHARE: u64 = TOTAL - PAYEE_SHARE;
 const DRAW_DELAY: u64 = 2;
+const MILESTONE_AMOUNTS: [u64; 2] = [200_000, 300_000];
+const DEADLINE: u64 = 100;
 
 struct Party {
     account: ComponentAddress,
@@ -64,10 +66,7 @@ struct Setup {
 fn new_test() -> TemplateTest {
     // Cargo runs tests with CWD = the verdict package dir, so the workspace
     // root is ../.. and both template crates load from there.
-    TemplateTest::new(
-        "../..",
-        ["templates/verdict", "templates/arbitratable-escrow"],
-    )
+    TemplateTest::new("../..", ["templates/verdict", "templates/milestone-escrow"])
 }
 
 fn create_verdict(test: &mut TemplateTest, signer: &RistrettoSecretKey) -> ComponentAddress {
@@ -91,10 +90,14 @@ fn create_escrow(
     payee_pk: RistrettoPublicKeyBytes,
     creator: &RistrettoSecretKey,
 ) -> ComponentAddress {
-    let template = test.get_template_address("ArbitratableEscrow");
+    let template = test.get_template_address("MilestoneEscrow");
     test.execute_expect_success(
         test.transaction()
-            .call_function(template, ctor, args![arbitrator, payee_pk])
+            .call_function(
+                template,
+                ctor,
+                args![arbitrator, payee_pk, MILESTONE_AMOUNTS.to_vec(), DEADLINE],
+            )
             .build_and_seal(creator),
         vec![],
     );
