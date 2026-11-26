@@ -869,7 +869,7 @@ describe("commit and reveal", () => {
 
 describe("escrow rules", () => {
   test("a ruling executes at most once and returns both buckets in one call", () => {
-    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
     escrow.freezeForDispute(0, COURT_ID);
     assert.deepEqual(
       escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n], COURT_ID),
@@ -883,7 +883,7 @@ describe("escrow rules", () => {
   });
 
   test("a ruling whose amounts do not sum to the vault is refused", () => {
-    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
     escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_PAY, [490000n, 9999n], COURT_ID),
@@ -894,7 +894,7 @@ describe("escrow rules", () => {
   });
 
   test("a refund that pays the payee is refused", () => {
-    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
     escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_REFUND, [1n, 499999n], COURT_ID),
@@ -905,7 +905,7 @@ describe("escrow rules", () => {
   });
 
   test("an invalid outcome is refused", () => {
-    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
     escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, 3, [490000n, 10000n], COURT_ID),
@@ -922,7 +922,7 @@ describe("escrow rules", () => {
       { outcome: NO_OUTCOME, amounts: [0n, 500000n] },
     ];
     for (const [i, cell] of cells.entries()) {
-      const escrow = new SimEscrow(`escrow-cell-${i}`, "payer", "payee", TOTAL);
+      const escrow = new SimEscrow(`escrow-cell-${i}`, "payer", "payee", TOTAL, COURT_ID);
       escrow.freezeForDispute(0, COURT_ID);
       assert.deepEqual(
         escrow.executeRuling(0, cell.outcome, cell.amounts, COURT_ID),
@@ -934,7 +934,7 @@ describe("escrow rules", () => {
   });
 
   test("ruling amounts must be a pair of whole amounts", () => {
-    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
     escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_PAY, 490000n, COURT_ID),
@@ -970,12 +970,12 @@ describe("escrow rules", () => {
   });
 
   test("an unfunded escrow cannot freeze for a dispute", () => {
-    const escrow = new SimEscrow("escrow-2", "payer", "payee", 0);
+    const escrow = new SimEscrow("escrow-2", "payer", "payee", 0, COURT_ID);
     assert.throws(() => escrow.freezeForDispute(0, COURT_ID), /escrow vault is empty/);
   });
 
   test("a stranger cannot freeze an escrow", () => {
-    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
     assert.throws(
       () => escrow.freezeForDispute(0, "stranger"),
       /only the court can freeze an escrow/,
@@ -986,13 +986,26 @@ describe("escrow rules", () => {
   });
 
   test("omitting the caller is refused when freezing", () => {
-    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
     assert.throws(
       () => escrow.freezeForDispute(0),
       /only the court can freeze an escrow/,
     );
     assert.equal(escrow.frozen, false);
     assert.equal(escrow.vault, BigInt(TOTAL));
+  });
+
+  test("omitting the court id when creating an escrow is refused", () => {
+    assert.throws(
+      () => new SimEscrow("escrow-1", "payer", "payee", TOTAL),
+      /court id must be a non-empty string/,
+    );
+    assert.throws(
+      () => new SimEscrow("escrow-1", "payer", "payee", TOTAL, ""),
+      /court id must be a non-empty string/,
+    );
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
+    assert.equal(escrow.courtId, COURT_ID);
   });
 });
 
@@ -1252,7 +1265,7 @@ describe("reschedule cap", () => {
 
 describe("round 3: caller, delays, epochs, atomic settlement, close rules", () => {
   test("a stranger cannot execute a ruling", () => {
-    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
     escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n], "stranger"),
@@ -1266,7 +1279,7 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
   });
 
   test("omitting the caller is rejected", () => {
-    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL, COURT_ID);
     escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n]),

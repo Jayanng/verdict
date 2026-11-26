@@ -240,7 +240,13 @@ export function majorityOutcome(reveals, panelSize = PANEL_SIZE) {
 // BigInt, so amounts above the safe integer range keep every micro-Tari;
 // a Number principal keeps the Number behaviour the page already uses.
 function amountToBigInt(value) {
-  if (typeof value === "bigint") return value;
+  if (typeof value === "bigint") {
+    // A negative BigInt must be refused, the same way a negative
+    // Number is: otherwise a negative principal or a negative split
+    // weight passes through and produces negative fees or shares.
+    if (value < 0n) throw new Error("amount must not be negative");
+    return value;
+  }
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
     return BigInt(value);
   }
@@ -279,6 +285,9 @@ export function settleAmounts(principal, outcome, majorityCount) {
 // A BigInt total splits in BigInt; a Number total keeps the Number behaviour.
 export function splitLargestRemainder(total, weights) {
   if (typeof total === "bigint") {
+    // A negative total is refused, the same way a negative weight is:
+    // splitting a negative amount would produce negative shares.
+    if (total < 0n) throw new Error("amount must not be negative");
     const bigWeights = weights.map((w) => amountToBigInt(w));
     const weightSum = bigWeights.reduce((sum, w) => sum + w, 0n);
     if (weightSum <= 0n) throw new Error("weights must sum to more than 0");

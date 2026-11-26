@@ -378,4 +378,11 @@ describe("BigInt settlement amounts", () => {
     assert.equal(parts.reduce((a, b) => a + b, 0n), 10000000000000000003n);
     assert.deepEqual(splitLargestRemainder(10n, [1, 1, 1]), [4n, 3n, 3n]);
   });
+
+  test("a negative BigInt principal or weight is refused, not computed", () => {
+    assert.throws(() => settleAmounts(-500000n, VOTE_PAY, 2), /must not be negative/);
+    assert.throws(() => settleAmounts(500000n, VOTE_PAY, -2n), /must not be negative/);
+    assert.throws(() => splitLargestRemainder(10n, [2n, -1n]), /must not be negative/);
+    assert.throws(() => splitLargestRemainder(-10n, [1n, 1n]), /must not be negative/);
+  });
 });

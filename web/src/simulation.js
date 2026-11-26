@@ -104,7 +104,10 @@ function defaultEpochHash(epoch) {
 // juror fees out of it, and returns both amounts in one call, so the
 // vault is empty after a ruling and no second call is needed.
 export class SimEscrow {
-  constructor(id, payer, payee, principal, courtId = COURT_ID) {
+  // The court id must be passed explicitly: there is no default, so
+  // omitting it refuses the call instead of silently authenticating
+  // as the court. The court identity is the escrow's arbitrator.
+  constructor(id, payer, payee, principal, courtId) {
     if (typeof courtId !== "string" || courtId.length === 0) {
       fail("court id must be a non-empty string");
     }
@@ -240,7 +243,7 @@ export class SimCourt {
       fail("insufficient balance to fund the escrow");
     }
     this.balances.set(payer, this.balance(payer) - principalAmount);
-    const escrow = new SimEscrow(id, payer, payee, principalAmount);
+    const escrow = new SimEscrow(id, payer, payee, principalAmount, this.courtId);
     this.escrows.set(id, escrow);
     return escrow;
   }
