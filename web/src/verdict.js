@@ -201,6 +201,24 @@ export function derivePanel(pool, drawHashHex, disputeId, round, domain = DRAW_D
 // { vote, count } or { vote: null, count: 0 } when there is no ruling,
 // which is the case the replacement draw and the fallback paths handle.
 export function majorityOutcome(reveals, panelSize = PANEL_SIZE) {
+  // The panel size and every vote are validated before any counting:
+  // a panel size that is not a non-negative whole number, or a vote
+  // that is not one of pay, refund, split, or refuse, is refused, so a
+  // direct call cannot return a ruling for a vote that does not exist.
+  // A panel of size 0 is an undrawn round, which can never reach a
+  // ruling, so it returns no ruling instead of being refused.
+  if (!Number.isSafeInteger(panelSize) || panelSize < 0) {
+    throw new Error("panel size must be a non-negative whole number within the safe integer range");
+  }
+  if (panelSize === 0) return { vote: null, count: 0 };
+  if (!Array.isArray(reveals)) {
+    throw new Error("reveals must be an array of votes");
+  }
+  for (const vote of reveals) {
+    if (!Number.isSafeInteger(vote) || vote < VOTE_PAY || vote > VOTE_REFUSE) {
+      throw new Error("vote must be one of pay, refund, split, or refuse");
+    }
+  }
   const quorum = Math.floor(panelSize / 2) + 1;
   if (reveals.length < quorum) return { vote: null, count: 0 };
   const counts = new Map();
@@ -345,6 +363,18 @@ export function splitLargestRemainder(total, weights) {
 // second settlement call. This is a browser-side check of that published
 // rule against the published inputs, not a chain call.
 export function callerRuleCheck(callerAddress, arbitratorAddress) {
+  // Both identities must be present before they are compared: two
+  // missing identities are equal to each other, so comparing them
+  // directly would accept a call with no caller at all.
+  if (
+    typeof callerAddress !== "string" || callerAddress.length === 0 ||
+    typeof arbitratorAddress !== "string" || arbitratorAddress.length === 0
+  ) {
+    return {
+      allowed: false,
+      reason: "the caller or arbitrator identity is missing, so the caller-component rule refuses the call.",
+    };
+  }
   if (callerAddress === arbitratorAddress) {
     return {
       allowed: true,

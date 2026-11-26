@@ -171,6 +171,26 @@ describe("majorityOutcome", () => {
       { vote: null, count: 0 },
     );
   });
+
+  test("a vote that does not exist is refused, not counted", () => {
+    assert.throws(() => majorityOutcome([99, 99, 99], PANEL_SIZE), /one of pay, refund, split, or refuse/);
+    assert.throws(() => majorityOutcome([VOTE_PAY, 4, VOTE_PAY], PANEL_SIZE), /one of pay, refund, split, or refuse/);
+    assert.throws(() => majorityOutcome([VOTE_PAY, -1, VOTE_PAY], PANEL_SIZE), /one of pay, refund, split, or refuse/);
+    assert.throws(() => majorityOutcome([VOTE_PAY, 1.5, VOTE_PAY], PANEL_SIZE), /one of pay, refund, split, or refuse/);
+  });
+
+  test("a panel size that is not a non-negative whole number is refused", () => {
+    assert.throws(() => majorityOutcome([VOTE_PAY, VOTE_PAY], -1), /non-negative whole number/);
+    assert.throws(() => majorityOutcome([VOTE_PAY, VOTE_PAY], 1.5), /non-negative whole number/);
+    assert.throws(() => majorityOutcome([VOTE_PAY, VOTE_PAY], Number.NaN), /non-negative whole number/);
+    assert.throws(() => majorityOutcome([VOTE_PAY, VOTE_PAY], "3"), /non-negative whole number/);
+    assert.throws(() => majorityOutcome("pay", PANEL_SIZE), /array of votes/);
+  });
+
+  test("an undrawn panel of size 0 returns no ruling, not a refusal", () => {
+    assert.deepEqual(majorityOutcome([], 0), { vote: null, count: 0 });
+    assert.deepEqual(majorityOutcome([VOTE_PAY, VOTE_PAY], 0), { vote: null, count: 0 });
+  });
 });
 
 describe("splitLargestRemainder", () => {
@@ -242,6 +262,18 @@ describe("callerRuleCheck", () => {
     const stranger = callerRuleCheck("component-stranger", court);
     assert.equal(stranger.allowed, false);
     assert.match(stranger.reason, /refuses/);
+  });
+
+  test("two missing identities are refused, not accepted as equal", () => {
+    const court = "component-court";
+    assert.equal(callerRuleCheck(undefined, undefined).allowed, false);
+    assert.equal(callerRuleCheck(null, null).allowed, false);
+    assert.equal(callerRuleCheck("", "").allowed, false);
+    assert.equal(callerRuleCheck(undefined, court).allowed, false);
+    assert.equal(callerRuleCheck(court, undefined).allowed, false);
+    assert.equal(callerRuleCheck("", court).allowed, false);
+    assert.equal(callerRuleCheck(court, "").allowed, false);
+    assert.match(callerRuleCheck(undefined, undefined).reason, /missing/);
   });
 });
 
