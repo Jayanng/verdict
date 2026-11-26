@@ -13,11 +13,18 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   derivePanel,
+  majorityOutcome,
+  settleAmounts,
   voteCommitmentBytes,
   bytesToHex,
   VOTE_PAY,
   VOTE_REFUND,
 } from "../src/verdict.js";
+
+const OUTCOME_LABELS = {
+  [VOTE_PAY]: "pay",
+  [VOTE_REFUND]: "refund",
+};
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -63,8 +70,30 @@ function buildDispute(config) {
     const commitment = sha256Hex(voteCommitmentBytes(vote, salt, config.id, juror.key));
     return { juror: juror.key, jurorLabel: juror.label, vote, salt, commitment };
   });
+  // The amounts are computed from the votes by the same rules the
+  // template settles with, never typed in by hand: the majority decides
+  // the outcome, the juror fees come first from the principal, capped at
+  // the principal, and only the remainder is routed.
+  let outcome = null;
+  let payeeAmount = null;
+  let payerAmount = null;
+  let fees = null;
+  if (config.votes.length) {
+    const majority = majorityOutcome(config.votes, panel.length);
+    if (majority.vote === null) throw new Error(`sample dispute ${config.id} has no ruling`);
+    outcome = OUTCOME_LABELS[majority.vote];
+    ({ fees, payeeAmount, payerAmount } = settleAmounts(
+      config.principal,
+      majority.vote,
+      majority.count,
+    ));
+  }
   return {
     ...config,
+    outcome,
+    payeeAmount,
+    payerAmount,
+    fees,
     drawHash,
     panel: panel.map((j) => ({ key: j.key, label: j.label })),
     panelIndexes,
@@ -91,9 +120,7 @@ const disputes = [
     round: 0,
     status: "settled",
     votes: [VOTE_PAY, VOTE_PAY, VOTE_REFUND],
-    outcome: "pay",
-    payeeAmount: 500000,
-    ruling: "Pay. Two of three jurors ruled the milestone was delivered, so the full milestone amount goes to the payee.",
+    ruling: "Pay. Two of three jurors ruled the milestone was delivered. The payee gets 490,000 micro-Tari: the principal less the 10,000 juror fees, paid first from the principal. The payer gets nothing back.",
     settlementTx: "sample-tx-settle-dispute-0",
     evidence: [
       evidenceItem("payer", 0, "Client note: no reply to the delivery message after 9 days."),
@@ -117,9 +144,7 @@ const disputes = [
     round: 0,
     status: "settled",
     votes: [VOTE_REFUND, VOTE_REFUND, VOTE_PAY],
-    outcome: "refund",
-    payeeAmount: 0,
-    ruling: "Refund. Two of three jurors ruled the work never started, so the amount returns to the payer.",
+    ruling: "Refund. Two of three jurors ruled the work never started. The payer gets 290,000 micro-Tari back: the principal less the 10,000 juror fees, paid first from the principal. The payee gets nothing.",
     settlementTx: "sample-tx-settle-dispute-1",
     evidence: [
       evidenceItem("payer", 0, "Payment receipt: 300,000 micro-Tari locked in escrow."),
@@ -142,8 +167,6 @@ const disputes = [
     round: 0,
     status: "voting open",
     votes: [],
-    outcome: null,
-    payeeAmount: null,
     ruling: null,
     settlementTx: null,
     evidence: [

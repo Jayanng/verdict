@@ -82,9 +82,7 @@ export const SAMPLE = {
         0,
         1
       ],
-      "outcome": "pay",
-      "payeeAmount": 500000,
-      "ruling": "Pay. Two of three jurors ruled the milestone was delivered, so the full milestone amount goes to the payee.",
+      "ruling": "Pay. Two of three jurors ruled the milestone was delivered. The payee gets 490,000 micro-Tari: the principal less the 10,000 juror fees, paid first from the principal. The payer gets nothing back.",
       "settlementTx": "sample-tx-settle-dispute-0",
       "evidence": [
         {
@@ -112,6 +110,10 @@ export const SAMPLE = {
           "sha256": "4629cd393cb10685e9cc7fcfe41275bd98eee7ac10a9b76f1e05220b17bb5b3e"
         }
       ],
+      "outcome": "pay",
+      "payeeAmount": 490000,
+      "payerAmount": 0,
+      "fees": 10000,
       "drawHash": "9e8d1651911f4dcfd4b7b0cb0d5500847067c5a6a3a17a086663d15ac7f2d4dd",
       "panel": [
         {
@@ -196,9 +198,7 @@ export const SAMPLE = {
         1,
         0
       ],
-      "outcome": "refund",
-      "payeeAmount": 0,
-      "ruling": "Refund. Two of three jurors ruled the work never started, so the amount returns to the payer.",
+      "ruling": "Refund. Two of three jurors ruled the work never started. The payer gets 290,000 micro-Tari back: the principal less the 10,000 juror fees, paid first from the principal. The payee gets nothing.",
       "settlementTx": "sample-tx-settle-dispute-1",
       "evidence": [
         {
@@ -218,6 +218,10 @@ export const SAMPLE = {
           "sha256": "6b59ad3aea8a4ff9c1b6619ced5eb90c785470cca702b6c29ca2d818a27126a2"
         }
       ],
+      "outcome": "refund",
+      "payeeAmount": 0,
+      "payerAmount": 290000,
+      "fees": 10000,
       "drawHash": "c46508fe57841fa4a0db3231a1b66713e4ab962e6024072725f2414d4c00003b",
       "panel": [
         {
@@ -299,8 +303,6 @@ export const SAMPLE = {
       "round": 0,
       "status": "voting open",
       "votes": [],
-      "outcome": null,
-      "payeeAmount": null,
       "ruling": null,
       "settlementTx": null,
       "evidence": [
@@ -321,6 +323,10 @@ export const SAMPLE = {
           "sha256": "1e5e5f4cd11e597e064e5a19a1b206ecba2b4a796b6ea1f7d721c72654f39b46"
         }
       ],
+      "outcome": null,
+      "payeeAmount": null,
+      "payerAmount": null,
+      "fees": null,
       "drawHash": "eed2206e9cd45dc96d958fb4a045478c456f83c1e6e0ecb96a8e75d7039eecf1",
       "panel": [
         {

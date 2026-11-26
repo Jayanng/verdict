@@ -1,17 +1,23 @@
 // Tests for web/src/verdict.js and the generated sample data.
 // Run from web/: node --test tests/
-// These are logic tests for the proof page. They are not parity tests: the
-// full simulation parity suite waits for Phase 3, because the simulation
-// must mirror the template rule for rule and Phase 3 is rewriting the
-// settlement matrix.
+// These are logic tests for the proof page. The simulation parity suite
+// lives in tests/parity.test.js and proves the simulation in
+// src/simulation.js agrees with this mirror and with the template rules.
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   PANEL_SIZE,
+  APPEAL_PANEL_SIZE,
   JUROR_FEE,
   BOND_FLOOR,
+  APPEAL_FEE,
+  SLASH,
+  MIN_DRAW_DELAY,
+  REVEAL_WINDOW,
+  DRAW_DOMAIN_FIRST,
+  DRAW_DOMAIN_APPEAL,
   VOTE_PAY,
   VOTE_REFUND,
   VOTE_SPLIT,
@@ -23,6 +29,7 @@ import {
   voteCommitmentBytes,
   derivePanel,
   majorityOutcome,
+  settleAmounts,
   splitLargestRemainder,
   callerRuleCheck,
 } from "../src/verdict.js";
@@ -31,9 +38,16 @@ import { SAMPLE } from "../src/sample-data.js";
 describe("template constants", () => {
   test("panel size, juror fee, and bond floor match the template", () => {
     assert.equal(PANEL_SIZE, 3);
+    assert.equal(APPEAL_PANEL_SIZE, 7);
     assert.equal(JUROR_FEE, 5000);
     assert.equal(BOND_FLOOR, 30000);
     assert.equal(BOND_FLOOR, 2 * JUROR_FEE * PANEL_SIZE);
+    assert.equal(APPEAL_FEE, 35000);
+    assert.equal(SLASH, 5000);
+    assert.equal(MIN_DRAW_DELAY, 1);
+    assert.equal(REVEAL_WINDOW, 2);
+    assert.equal(DRAW_DOMAIN_FIRST, 0);
+    assert.equal(DRAW_DOMAIN_APPEAL, 1);
   });
 });
 
@@ -100,9 +114,20 @@ describe("derivePanel", () => {
     assert.notDeepEqual(changedRound, base);
   });
 
-  test("small pool returns fewer jurors, empty pool returns none", () => {
-    assert.equal(derivePanel(pool.slice(0, 2), drawHash, 0, 0).length, 2);
-    assert.deepEqual(derivePanel([], drawHash, 0, 0), []);
+  test("changing the draw domain changes the panel", () => {
+    const first = derivePanel(pool, drawHash, 0, 0, DRAW_DOMAIN_FIRST, PANEL_SIZE);
+    const appeal = derivePanel(pool, drawHash, 0, 0, DRAW_DOMAIN_APPEAL, APPEAL_PANEL_SIZE);
+    assert.notDeepEqual(appeal.slice(0, 3), first);
+    assert.notDeepEqual(appeal, first);
+  });
+
+  test("a pool smaller than the panel is refused", () => {
+    assert.throws(() => derivePanel(pool.slice(0, 2), drawHash, 0, 0), /not enough eligible jurors/);
+    assert.throws(() => derivePanel([], drawHash, 0, 0), /not enough eligible jurors/);
+    assert.throws(
+      () => derivePanel(pool.slice(0, 6), drawHash, 0, 0, DRAW_DOMAIN_APPEAL, APPEAL_PANEL_SIZE),
+      /not enough eligible jurors/,
+    );
   });
 });
 
@@ -121,11 +146,29 @@ describe("majorityOutcome", () => {
     });
   });
 
-  test("majority refuse is a valid outcome", () => {
-    assert.deepEqual(majorityOutcome([VOTE_REFUSE, VOTE_REFUSE, VOTE_PAY]), {
-      vote: VOTE_REFUSE,
-      count: 2,
+  test("one revealed vote for pay returns no ruling: the quorum is not met", () => {
+    assert.deepEqual(majorityOutcome([VOTE_PAY], PANEL_SIZE), {
+      vote: null,
+      count: 0,
     });
+  });
+
+  test("two refuse votes return no ruling: refuse never counts", () => {
+    assert.deepEqual(majorityOutcome([VOTE_REFUSE, VOTE_REFUSE], PANEL_SIZE), {
+      vote: null,
+      count: 0,
+    });
+    assert.deepEqual(majorityOutcome([VOTE_REFUSE, VOTE_REFUSE, VOTE_PAY], PANEL_SIZE), {
+      vote: null,
+      count: 1,
+    });
+  });
+
+  test("three reveals on a panel of seven return no ruling: the quorum is not met", () => {
+    assert.deepEqual(
+      majorityOutcome([VOTE_PAY, VOTE_PAY, VOTE_PAY], APPEAL_PANEL_SIZE),
+      { vote: null, count: 0 },
+    );
   });
 });
 
@@ -138,8 +181,51 @@ describe("splitLargestRemainder", () => {
     assert.equal(parts.reduce((a, b) => a + b, 0), 999983);
   });
 
-  test("zero weights are rejected", () => {
-    assert.throws(() => splitLargestRemainder(100, [0, 0]), /weights must sum above zero/);
+  test("all empty weights are rejected", () => {
+    assert.throws(() => splitLargestRemainder(100, [0, 0]), /weights must sum to more than 0/);
+  });
+});
+
+describe("settleAmounts", () => {
+  test("pay routes the principal less the majority fees to the payee", () => {
+    assert.deepEqual(settleAmounts(500000, VOTE_PAY, 2), {
+      fees: 10000,
+      payeeAmount: 490000,
+      payerAmount: 0,
+    });
+  });
+
+  test("refund routes the principal less the majority fees to the payer", () => {
+    assert.deepEqual(settleAmounts(300000, VOTE_REFUND, 2), {
+      fees: 10000,
+      payeeAmount: 0,
+      payerAmount: 290000,
+    });
+  });
+
+  test("split divides the remainder by largest remainder, odd micro-Tari to the payee", () => {
+    assert.deepEqual(settleAmounts(100001, VOTE_SPLIT, 2), {
+      fees: 10000,
+      payeeAmount: 45001,
+      payerAmount: 45000,
+    });
+    assert.deepEqual(settleAmounts(500000, VOTE_SPLIT, 2), {
+      fees: 10000,
+      payeeAmount: 245000,
+      payerAmount: 245000,
+    });
+  });
+
+  test("fees are capped at a small principal", () => {
+    assert.deepEqual(settleAmounts(10000, VOTE_PAY, 2), {
+      fees: 10000,
+      payeeAmount: 0,
+      payerAmount: 0,
+    });
+  });
+
+  test("refuse is not a ruled outcome", () => {
+    assert.throws(() => settleAmounts(500000, VOTE_REFUSE, 2), /needs a ruled outcome/);
   });
 });
 
@@ -186,8 +272,25 @@ describe("sample data consistency", () => {
     for (const dispute of SAMPLE.disputes) {
       if (dispute.reveals.length === 0) continue;
       const votes = dispute.reveals.map((r) => r.vote);
-      const outcome = majorityOutcome(votes);
+      const outcome = majorityOutcome(votes, dispute.panel.length);
       assert.equal(outcome.vote, dispute.outcome === "pay" ? VOTE_PAY : VOTE_REFUND);
+    }
+  });
+
+  test("sample amounts match the settlement rules and conserve exactly", () => {
+    for (const dispute of SAMPLE.disputes) {
+      if (dispute.reveals.length === 0) continue;
+      const votes = dispute.reveals.map((r) => r.vote);
+      const outcome = majorityOutcome(votes, dispute.panel.length);
+      const amounts = settleAmounts(dispute.principal, outcome.vote, outcome.count);
+      assert.equal(dispute.payeeAmount, amounts.payeeAmount, `dispute ${dispute.id} payee`);
+      assert.equal(dispute.payerAmount, amounts.payerAmount, `dispute ${dispute.id} payer`);
+      assert.equal(dispute.fees, amounts.fees, `dispute ${dispute.id} fees`);
+      assert.equal(
+        dispute.payeeAmount + dispute.payerAmount + dispute.fees,
+        dispute.principal,
+        `dispute ${dispute.id} conservation`,
+      );
     }
   });
 });

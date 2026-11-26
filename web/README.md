@@ -11,7 +11,8 @@ npm run serve   # serves web/ on http://localhost:8000
 
 Open http://localhost:8000/index.html. Pages are hash routed: `#/` home,
 `#/app` disputes, `#/dispute/0` dispute detail and proof page, `#/open`
-guided four-step dispute form, `#/juror` become a juror.
+guided four-step dispute form, `#/juror` become a juror, `#/simulate` the
+walletless simulation walkthrough.
 
 ## What is built
 
@@ -30,13 +31,23 @@ guided four-step dispute form, `#/juror` become a juror.
   it is added.
 - Become a juror: bond floor 30,000 micro-Tari, fee 5,000 micro-Tari per
   dispute, risks, and the demo pool seeded with known testers and disclosed.
+- Simulate a dispute (`#/simulate`): the walletless simulation engine in
+  `src/simulation.js`, running the full lifecycle in the browser with no
+  wallet, no funds, and no chain. A guided walkthrough opens a dispute,
+  draws the panel, commits and reveals, rules, appeals, and settles, with
+  deliberate rejections along the way: delay 0, replacement before the
+  reveal deadline, settle with one vote, reveal with the wrong salt, appeal
+  with the wrong fee. Labelled as a simulation on the page, never as live.
 
 The proof page mirrors the template rules as they stand in
 `templates/verdict/src/lib.rs`: panel derivation from draw hash, dispute id,
-round, and frozen pool; commitment hash of (vote, salt, dispute id, juror);
-`execute_ruling(dispute_id, payee_amount)` gated by the caller-component
-rule plus the in-method assert plus `OwnerRule::None`. The shared rules live
-in `src/verdict.js` and are imported by both the page and the tests.
+round, draw domain, and frozen pool; commitment hash of (vote, salt, dispute
+id, juror); `execute_ruling(dispute_id, payee_amount)` gated by the
+caller-component rule plus the in-method assert plus `OwnerRule::None`. The
+shared rules live in `src/verdict.js` and are imported by both the page and
+the tests. The mirror covers the settlement matrix, the quorum rule, the
+refuse exclusion, the fee deduction before the split, the appeal rules, and
+the replacement and fallback rules.
 
 ## Sample data
 
@@ -55,13 +66,28 @@ No key is a real person, no hash is on chain, and no amount moved.
 ## Tests
 
 ```sh
-npm test   # node --test tests/verdict.test.js, 18 tests
+npm test             # node --test tests/verdict.test.js, 27 tests
+npm run test:parity  # node --test tests/parity.test.js, 46 tests
+npm run test:all     # both suites, 73 tests
 ```
 
-The suite checks the panel derivation, the vote commitment bytes, the pure
-JavaScript SHA-256 against node:crypto vectors, majority and split math, the
-caller rule, and that the sample data is internally consistent. These are
-logic tests for the proof page, not parity tests.
+The mirror suite checks the panel derivation, the vote commitment bytes, the
+pure JavaScript SHA-256 against node:crypto vectors, majority and split math,
+the settlement amounts, the caller rule, and that the sample data is
+internally consistent and conserves exactly.
+
+The parity suite proves the simulation in `src/simulation.js` agrees with
+the mirror and with the template rules on every rule and every rejection
+message: the draw delay minimum, the reschedule rule, the reveal window and
+the replacement caller rule, the pool minimums, the draw domain separation,
+the quorum rule, the refuse exclusion, the fee deduction before the split,
+every cell of the settlement matrix, the appeal path, and the no-ruling
+fallback. The engine suite is the other half of the proof, run from the repo
+root with the build target set:
+
+```sh
+CARGO_TARGET_DIR=~/workspace/verdict-build-target cargo test
+```
 
 ## Design
 
@@ -80,14 +106,11 @@ move to React, via the shadcn CLI.
 ## Not in this part
 
 - The live path via Sapient (reading the live Esmeralda indexer and
-  template) is out of scope. The live path is blocked: no tTARI in hand, no
-  wallet account, no wallet daemon running, hello template publish not
-  attempted. The proof page works with published inputs the user can paste
-  or that the sample data provides, and labels what is live versus sample.
-- The full walletless simulation engine and the parity test suite wait for
-  Phase 3, because the simulation must mirror the template rule for rule and
-  Phase 3 is rewriting the settlement matrix. No simulation stub is shipped,
-  and nothing here is counted as a parity test.
-- The settlement routing shown on settled disputes is the routing as it
-  stands in the templates at this commit. How juror fees are funded from the
-  principal is set by the settlement matrix, which is being written now.
+  template) is out of scope. The proof page works with published inputs the
+  user can paste or that the sample data provides, and labels what is live
+  versus sample. The simulation page is labelled as a simulation, never as
+  live, and makes no live claim.
+- The settlement routing shown on settled disputes is the routing the
+  templates settle with: the juror fees come first from the principal,
+  capped at the principal, and only the remainder is routed to the payee or
+  the payer.

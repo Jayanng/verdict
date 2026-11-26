@@ -1,4 +1,4 @@
-// Verdict shared rules, mirrored from templates/verdict/src/lib.rs at ce96588.
+// Verdict shared rules, mirrored from templates/verdict/src/lib.rs at 1ed27ab.
 //
 // This module is pure logic with no DOM and no network. The browser app and
 // the Node test suite both import it, so the proof page recomputes exactly
@@ -6,9 +6,16 @@
 // page shows as live must come from the indexer, which is not wired yet.
 
 export const PANEL_SIZE = 3;
+export const APPEAL_PANEL_SIZE = 7;
 export const JUROR_FEE = 5000;
 export const BOND_FLOOR = 2 * JUROR_FEE * PANEL_SIZE;
+export const APPEAL_FEE = 35000;
+export const SLASH = 5000;
 export const EVIDENCE_LIMIT = 3;
+export const MIN_DRAW_DELAY = 1;
+export const REVEAL_WINDOW = 2;
+export const DRAW_DOMAIN_FIRST = 0;
+export const DRAW_DOMAIN_APPEAL = 1;
 
 export const VOTE_PAY = 0;
 export const VOTE_REFUND = 1;
@@ -131,15 +138,18 @@ export function voteCommitmentBytes(vote, saltHex, disputeId, jurorHex) {
 
 // The panel derivation, exactly as the template derives it. For each slot,
 // read an 8-byte window of the draw hash, fold in the dispute id, the round,
-// and the slot, take the result modulo the pool size, and probe forward until
-// an unpicked juror is found. Returns the panel as pool indices, in order.
-// Arithmetic is BigInt so the 64-bit wrapping add matches the template.
-export function derivePanel(pool, drawHashHex, disputeId, round) {
+// the draw domain, and the slot, take the result modulo the pool size, and
+// probe forward until an unpicked juror is found. Returns the panel as pool
+// indices, in order. Arithmetic is BigInt so the 64-bit wrapping add matches
+// the template. The domain is 0 for a first round and 1 for an appeal, so
+// the two rounds never draw the same panel from the same hash. The pool must
+// already hold a full panel, or the draw is refused.
+export function derivePanel(pool, drawHashHex, disputeId, round, domain = DRAW_DOMAIN_FIRST, size = PANEL_SIZE) {
   const hashBytes = hexToBytes(drawHashHex);
   if (hashBytes.length !== 32) throw new Error("draw hash must be 32 bytes");
   const poolLen = pool.length;
-  if (poolLen === 0) return [];
-  const target = Math.min(PANEL_SIZE, poolLen);
+  if (poolLen < size) throw new Error("not enough eligible jurors");
+  const target = size;
   const two64 = 1n << 64n;
   const panel = [];
   for (let slot = 0; slot < target; slot += 1) {
@@ -152,7 +162,7 @@ export function derivePanel(pool, drawHashHex, disputeId, round) {
     for (let i = 0; i < 8; i += 1) {
       value |= BigInt(window[i]) << BigInt(8 * i);
     }
-    const sum = (value + BigInt(disputeId) + BigInt(round) + BigInt(slot)) % two64;
+    const sum = (value + BigInt(disputeId) + BigInt(round) + BigInt(domain) + BigInt(slot)) % two64;
     let candidate = Number(sum % BigInt(poolLen));
     while (panel.includes(candidate)) {
       candidate = (candidate + 1) % poolLen;
@@ -162,12 +172,19 @@ export function derivePanel(pool, drawHashHex, disputeId, round) {
   return panel;
 }
 
-// Majority of the revealed votes. A majority needs more than half the panel.
-// Returns { vote, count } or { vote: null, count: 0 } when no vote holds a
-// majority, which is the tie case the appeal and fallback paths handle.
-export function majorityOutcome(reveals) {
+// Majority of the revealed votes, exactly as the template rules it. First,
+// at least a majority of the panel must have revealed at all, which is the
+// quorum. Then one of pay, refund, or split must hold a strict majority of
+// the revealed votes. Refuse votes never count toward an outcome: a panel
+// that only refuses has no ruling. Returns { vote, count } or
+// { vote: null, count: 0 } when there is no ruling, which is the case the
+// replacement draw and the fallback paths handle.
+export function majorityOutcome(reveals, panelSize = PANEL_SIZE) {
+  const quorum = Math.floor(panelSize / 2) + 1;
+  if (reveals.length < quorum) return { vote: null, count: 0 };
   const counts = new Map();
   for (const vote of reveals) {
+    if (vote === VOTE_REFUSE) continue;
     counts.set(vote, (counts.get(vote) || 0) + 1);
   }
   let best = null;
@@ -184,11 +201,34 @@ export function majorityOutcome(reveals) {
   return { vote: null, count: bestCount };
 }
 
+// The principal routing for a ruled outcome, exactly as the template
+// settles it. The juror fees come first from the principal, capped at the
+// principal, and only the remainder is routed: pay sends it to the payee,
+// refund returns it to the payer, split divides it by largest remainder,
+// with the odd micro-Tari to the payee. Returns { fees, payeeAmount,
+// payerAmount }. Slashed bonds top up majority juror claims on top of the
+// fee, and are paid through claim_fee, not through this routing.
+export function settleAmounts(principal, outcome, majorityCount) {
+  const fees = Math.min(JUROR_FEE * majorityCount, principal);
+  const postFee = principal - fees;
+  if (outcome === VOTE_PAY) {
+    return { fees, payeeAmount: postFee, payerAmount: 0 };
+  }
+  if (outcome === VOTE_REFUND) {
+    return { fees, payeeAmount: 0, payerAmount: postFee };
+  }
+  if (outcome === VOTE_SPLIT) {
+    const [payeeAmount, payerAmount] = splitLargestRemainder(postFee, [1, 1]);
+    return { fees, payeeAmount, payerAmount };
+  }
+  throw new Error("settleAmounts needs a ruled outcome: pay, refund, or split");
+}
+
 // Split a total across weights by largest remainder, so the parts always sum
 // to the total exactly, to the micro-Tari. Ties break toward the earlier part.
 export function splitLargestRemainder(total, weights) {
   const weightSum = weights.reduce((sum, w) => sum + w, 0);
-  if (weightSum <= 0) throw new Error("weights must sum above zero");
+  if (weightSum <= 0) throw new Error("weights must sum to more than 0");
   const exact = weights.map((w) => (total * w) / weightSum);
   const floors = exact.map((x) => Math.floor(x));
   let assigned = floors.reduce((sum, x) => sum + x, 0);

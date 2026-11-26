@@ -9,13 +9,19 @@ import {
   JUROR_FEE,
   BOND_FLOOR,
   EVIDENCE_LIMIT,
+  APPEAL_FEE,
+  DRAW_DOMAIN_FIRST,
+  VOTE_PAY,
+  VOTE_REFUND,
   VOTE_LABELS,
   derivePanel,
   majorityOutcome,
+  settleAmounts,
   callerRuleCheck,
   sha256Hex,
   voteCommitmentBytes,
 } from "./verdict.js";
+import { SimCourt, NO_OUTCOME, SIM_VOTE_LABELS } from "./simulation.js";
 
 const REPO = "https://github.com/Jayanng/verdict";
 const COURT_COMPONENT = "sample-component-court";
@@ -167,7 +173,9 @@ function renderDispute(id) {
     window.scrollTo(0, 0);
     return;
   }
-  const majority = d.reveals.length ? majorityOutcome(d.reveals.map((r) => r.vote)) : null;
+  const majority = d.reveals.length
+    ? majorityOutcome(d.reveals.map((r) => r.vote), d.panel.length)
+    : null;
   const panelRows = d.panel.map((p) => `<tr>
       <td>${esc(p.label)}</td>
       <td class="mono">${shortHex(p.key)}</td>
@@ -198,11 +206,12 @@ function renderDispute(id) {
       <p class="lede" style="margin-top: 8px;">${esc(d.ruling)}</p>
       <div class="fact-grid mt-24">
         <div class="fact"><div class="k">Payee amount</div><div class="v">${fmt(d.payeeAmount)} &micro;T</div></div>
-        <div class="fact"><div class="k">Remainder to payer</div><div class="v">${fmt(d.principal - d.payeeAmount)} &micro;T</div></div>
+        <div class="fact"><div class="k">Remainder to payer</div><div class="v">${fmt(d.payerAmount)} &micro;T</div></div>
+        <div class="fact"><div class="k">Juror fees, paid first</div><div class="v">${fmt(d.fees)} &micro;T</div></div>
         <div class="fact"><div class="k">Majority</div><div class="v">${majority ? `${majority.count} of ${d.reveals.length} jurors` : "none"}</div></div>
         <div class="fact"><div class="k">Settlement record</div><div class="v mono">${esc(d.settlementTx)}</div></div>
       </div>
-      <p class="sec-note" style="margin-top: 16px;">Routing as it stands in the templates at this commit: the court calls execute_ruling with the payee amount, the payee bucket goes to the payee account, and the remainder bucket goes straight to the payer account. The settlement record above is a sample label, not a transaction on chain. How juror fees are funded from the principal is set by the settlement matrix, which is being written now.</p>
+      <p class="sec-note" style="margin-top: 16px;">Routing as the templates settle it: the court calls execute_ruling with the payee amount, the payee bucket goes to the payee account, the juror fees come first from the remainder bucket into the fee vault, and what is left of the remainder goes straight to the payer account. The settlement record above is a sample label, not a transaction on chain. Payee, payer, and fees always sum to the principal exactly.</p>
     </div>` : `
     <div class="rui-card mt-24">
       <h3>Ruling: not yet made</h3>
@@ -350,6 +359,8 @@ function initDisputePage(d) {
         drawHashInput.value.trim(),
         Number(drawDisputeInput.value),
         Number(drawRoundInput.value),
+        DRAW_DOMAIN_FIRST,
+        PANEL_SIZE,
       );
       const labels = indexes.map((i) => SAMPLE.jurors[i].label).join(", ");
       const changed = labels !== recordedLabels;
@@ -699,6 +710,261 @@ function renderJuror() {
   });
 }
 
+// ----- simulation walkthrough -----
+
+// A fresh simulated court, seeded with the seven sample testers as the
+// juror pool. Nothing here is live: no wallet, no funds, no chain.
+function freshSimCourt() {
+  const court = new SimCourt();
+  for (const juror of SAMPLE.jurors) {
+    court.fund(juror.key, 100000);
+    court.registerJuror(juror.key, BOND_FLOOR);
+  }
+  court.fund("Ada, client", 1000000);
+  court.fund("Bola, freelancer", 0);
+  court.createEscrow("sim-escrow", "Ada, client", "Bola, freelancer", 500000);
+  return court;
+}
+
+function simSalt(i) {
+  return sha256Hex(`walkthrough-salt-${i}`);
+}
+
+function simJurorLabel(court, key) {
+  const juror = SAMPLE.jurors.find((j) => j.key === key);
+  return juror ? juror.label : shortHex(key);
+}
+
+function renderSimState(court, disputeId) {
+  const box = document.getElementById("simState");
+  if (!box) return;
+  if (disputeId === null) {
+    box.innerHTML = `<p class="sec-note">No dispute yet. Run the guided walkthrough or try a rejection below.</p>`;
+    return;
+  }
+  const d = court.snapshot(disputeId);
+  const escrow = court.escrows.get("sim-escrow");
+  const status = d.settled
+    ? "Settled"
+    : d.closedNoRuling
+      ? "Closed, no ruling"
+      : d.appealed
+        ? "Under appeal"
+        : d.drawn
+          ? "Voting open"
+          : "Opened, waiting for the draw";
+  const panelRows = d.panel
+    .map((key, i) => {
+      const reveal = d.reveals.find((r) => r.juror === key);
+      return `<tr><td>${esc(simJurorLabel(court, key))}</td><td>${reveal ? esc(SIM_VOTE_LABELS[reveal.vote]) : "not revealed"}</td></tr>`;
+    })
+    .join("");
+  const appealRows = d.appealPanel
+    .map((key) => {
+      const reveal = d.appealReveals.find((r) => r.juror === key);
+      return `<tr><td>${esc(simJurorLabel(court, key))}</td><td>${reveal ? esc(SIM_VOTE_LABELS[reveal.vote]) : "not revealed"}</td></tr>`;
+    })
+    .join("");
+  const claimRows = d.claims
+    .map(
+      (c) =>
+        `<tr><td>${esc(simJurorLabel(court, c.juror))}</td><td>${fmt(c.amount)} &micro;T</td><td>${c.claimed ? "claimed" : "unclaimed"}</td></tr>`,
+    )
+    .join("");
+  box.innerHTML = `
+    <div class="fact-grid mt-16">
+      <div class="fact"><div class="k">Epoch</div><div class="v">${court.epoch}</div></div>
+      <div class="fact"><div class="k">Status</div><div class="v">${esc(status)}</div></div>
+      <div class="fact"><div class="k">Principal</div><div class="v">${fmt(d.principal)} &micro;T</div></div>
+      <div class="fact"><div class="k">Escrow vault</div><div class="v">${fmt(escrow.vault)} &micro;T</div></div>
+      <div class="fact"><div class="k">Outcome</div><div class="v">${d.outcome === NO_OUTCOME ? "none yet" : esc(SIM_VOTE_LABELS[d.outcome])}</div></div>
+      <div class="fact"><div class="k">Payee / payer / fees</div><div class="v">${fmt(d.payeeAmount)} / ${fmt(d.payerAmount)} / ${fmt(d.feesPaid)} &micro;T</div></div>
+      <div class="fact"><div class="k">Payer balance</div><div class="v">${fmt(court.balance("Ada, client"))} &micro;T</div></div>
+      <div class="fact"><div class="k">Payee balance</div><div class="v">${fmt(court.balance("Bola, freelancer"))} &micro;T</div></div>
+    </div>
+    <h3 class="mt-24">First-round panel</h3>
+    <table class="rui-table mt-16"><thead><tr><th>Juror</th><th>Revealed vote</th></tr></thead><tbody>${panelRows || "<tr><td colspan=\"2\">No panel drawn yet.</td></tr>"}</tbody></table>
+    ${d.appealed ? `<h3 class="mt-24">Appeal panel</h3>
+    <table class="rui-table mt-16"><thead><tr><th>Juror</th><th>Revealed vote</th></tr></thead><tbody>${appealRows || "<tr><td colspan=\"2\">No appeal panel drawn yet.</td></tr>"}</tbody></table>` : ""}
+    ${claimRows ? `<h3 class="mt-24">Fee claims</h3>
+    <table class="rui-table mt-16"><thead><tr><th>Juror</th><th>Amount</th><th>State</th></tr></thead><tbody>${claimRows}</tbody></table>` : ""}`;
+}
+
+function simLog(message, kind) {
+  const log = document.getElementById("simLog");
+  if (!log) return;
+  const item = document.createElement("div");
+  item.className = kind === "reject" ? "result-box fail" : "result-box pass";
+  item.style.marginTop = "8px";
+  item.textContent = message;
+  log.appendChild(item);
+}
+
+function runWalkthrough() {
+  const log = document.getElementById("simLog");
+  if (log) log.innerHTML = "";
+  const court = freshSimCourt();
+  window.__simCourt = court;
+  let disputeId = null;
+  const step = (n, text) => simLog(`Step ${n}: ${text}`, "ok");
+  const reject = (n, text) => simLog(`Step ${n}: refused, ${text}`, "reject");
+
+  // Step 1: seven jurors, bonded, escrow funded.
+  step(1, `Court ready: 7 sample jurors registered at the ${fmt(BOND_FLOOR)} micro-Tari bond floor, escrow funded with 500,000 micro-Tari by Ada.`);
+  // Step 2: open with delay 0 is refused, then delay 2 opens.
+  try {
+    court.openDispute("sim-escrow", 0);
+  } catch (error) {
+    reject(2, `open with delay 0, "${error.message}". The draw must commit to a future epoch.`);
+  }
+  disputeId = court.openDispute("sim-escrow", 2);
+  step(2, `Dispute #${disputeId} opened at epoch 0. The draw locks to epoch 2, a future epoch hash.`);
+  // Step 3: evidence.
+  court.submitEvidence(disputeId, "Ada, client", 0, 0, sha256Hex("walkthrough-evidence-a"), "sample://evidence/a.txt");
+  court.submitEvidence(disputeId, "Bola, freelancer", 1, 0, sha256Hex("walkthrough-evidence-b"), "sample://evidence/b.txt");
+  step(3, "Evidence posted: one item per side, hashed, immutable once posted.");
+  // Step 4: draw at epoch 2.
+  court.setEpoch(2);
+  const { panel } = court.drawJury(disputeId);
+  step(4, `Panel drawn at epoch 2 from the future epoch hash: ${panel.map((k) => simJurorLabel(court, k)).join(", ")}. Reveal deadline is epoch 4.`);
+  // Step 5: a wrong-salt reveal is refused, then the real votes land.
+  const votes = [VOTE_PAY, VOTE_PAY, VOTE_REFUND];
+  panel.forEach((juror, i) => court.commitVote(disputeId, juror, votes[i], simSalt(i)));
+  try {
+    court.revealVote(disputeId, panel[0], VOTE_PAY, simSalt(99));
+  } catch (error) {
+    reject(5, `reveal with the wrong salt, "${error.message}".`);
+  }
+  panel.forEach((juror, i) => court.revealVote(disputeId, juror, votes[i], simSalt(i)));
+  step(5, "Votes committed then revealed: pay, pay, refund. Two of three is a majority for pay.");
+  // Step 6: a replacement before the deadline is refused, then the
+  // first-round ruling is reached. The dispute is not settled yet: the
+  // payer appeals, and the template settles only once, after the appeal.
+  try {
+    court.replaceJury(disputeId, "Ada, client", 2);
+  } catch (error) {
+    reject(6, `replace before the reveal deadline, "${error.message}". Honest jurors still have time to reveal.`);
+  }
+  const first = court.firstOutcome(court.dispute(disputeId));
+  const wouldBe = settleAmounts(500000, first.vote, first.count);
+  step(6, `First-round ruling reached: pay, two to one. If it stood, the payee would get ${fmt(wouldBe.payeeAmount)} micro-Tari, with ${fmt(wouldBe.fees)} juror fees paid first. Ada appeals instead, so nothing moves yet.`);
+  // Step 7: appeal with the wrong fee is refused, then the real appeal opens.
+  try {
+    court.openAppeal(disputeId, "Ada, client", APPEAL_FEE - 1, 2);
+  } catch (error) {
+    reject(7, `appeal with the wrong fee, "${error.message}". The fee is exactly ${fmt(APPEAL_FEE)} micro-Tari.`);
+  }
+  court.openAppeal(disputeId, "Ada, client", APPEAL_FEE, 2);
+  step(7, `Appeal opened by Ada, fee ${fmt(APPEAL_FEE)} micro-Tari posted. The appeal draw locks to epoch 4.`);
+  // Step 8: draw the appeal panel of seven and rule refund four to three.
+  court.setEpoch(4);
+  const { panel: appealPanel } = court.drawAppealJury(disputeId);
+  step(8, `Appeal panel drawn at epoch 4: seven jurors, a fresh draw domain, so the panel differs from the first round even with the same hash.`);
+  const appealVotes = [VOTE_REFUND, VOTE_REFUND, VOTE_REFUND, VOTE_REFUND, VOTE_PAY, VOTE_PAY, VOTE_PAY];
+  appealPanel.forEach((juror, i) => court.commitAppealVote(disputeId, juror, appealVotes[i], simSalt(i + 20)));
+  appealPanel.forEach((juror, i) => court.revealAppealVote(disputeId, juror, appealVotes[i], simSalt(i + 20)));
+  step(8, "Appeal votes revealed: refund, refund, refund, refund, pay, pay, pay. Four of seven is a majority for refund.");
+  // Step 9: settle the appeal and claim the fees.
+  const appealed = court.settle(disputeId);
+  step(9, `Appeal settled. The first ruling is overturned: payer gets ${fmt(appealed.payerAmount)} micro-Tari back, plus ${fmt(appealed.leftoverAppealFee)} unspent appeal fee. Payer net from the start is minus 30,000: the 10,000 first-round juror fees plus the 20,000 appeal juror fees, both taken from money she put in. Payee, payer, and fees sum to 500,000 exactly.`);
+  const snapshot = court.snapshot(disputeId);
+  const paid = [];
+  for (const claim of snapshot.claims) {
+    if (claim.amount > 0 && !claim.claimed) {
+      court.claimFee(disputeId, claim.juror);
+      paid.push(`${simJurorLabel(court, claim.juror)} ${fmt(claim.amount)}`);
+    }
+  }
+  step(9, `Fee claims paid: ${paid.join(", ")}. The escrow vault is now ${fmt(court.escrows.get("sim-escrow").vault)} micro-Tari, and every amount is conserved exactly.`);
+  renderSimState(court, disputeId);
+}
+
+function runRejection(kind) {
+  const court = freshSimCourt();
+  try {
+    if (kind === "delay") {
+      court.openDispute("sim-escrow", 0);
+    } else if (kind === "replace") {
+      const disputeId = court.openDispute("sim-escrow", 2);
+      court.setEpoch(2);
+      court.drawJury(disputeId);
+      court.replaceJury(disputeId, "Ada, client", 2);
+    } else if (kind === "quorum") {
+      const disputeId = court.openDispute("sim-escrow", 2);
+      court.setEpoch(2);
+      const { panel } = court.drawJury(disputeId);
+      court.commitVote(disputeId, panel[0], VOTE_PAY, simSalt(0));
+      court.revealVote(disputeId, panel[0], VOTE_PAY, simSalt(0));
+      court.settle(disputeId);
+    } else if (kind === "salt") {
+      const disputeId = court.openDispute("sim-escrow", 2);
+      court.setEpoch(2);
+      const { panel } = court.drawJury(disputeId);
+      court.commitVote(disputeId, panel[0], VOTE_PAY, simSalt(0));
+      court.revealVote(disputeId, panel[0], VOTE_PAY, simSalt(1));
+    } else if (kind === "fee") {
+      const disputeId = court.openDispute("sim-escrow", 2);
+      court.setEpoch(2);
+      const { panel } = court.drawJury(disputeId);
+      panel.forEach((juror, i) => court.commitVote(disputeId, juror, [VOTE_PAY, VOTE_PAY, VOTE_REFUND][i], simSalt(i)));
+      panel.forEach((juror, i) => court.revealVote(disputeId, juror, [VOTE_PAY, VOTE_PAY, VOTE_REFUND][i], simSalt(i)));
+      court.openAppeal(disputeId, "Ada, client", 1000, 2);
+    }
+    simLog(`Rejection ${kind}: the call was accepted, which should not happen.`, "reject");
+  } catch (error) {
+    simLog(`Rejection ${kind}: refused, "${error.message}".`, "reject");
+  }
+}
+
+function renderSimulate() {
+  page.innerHTML = `
+    <section class="section tight">
+      <div class="wrap">
+        <div class="sec-head">
+          <h2>Simulate a dispute.</h2>
+          <p class="sec-note"><b>Simulation, not live.</b> This page runs the full dispute lifecycle in your browser with no wallet, no funds, and no chain. The rules match the court templates exactly, and the parity suite proves it. Nothing here moves real micro-Tari, and nothing here is a transaction on chain.</p>
+        </div>
+        <div class="cols-3">
+          <div class="plain-card"><span class="num">RULES</span><h3>Same as the templates</h3><p>Future-epoch draw, commit-reveal, quorum, refuse exclusion, fees first from the principal, appeal, replacement, and the no-ruling fallback.</p></div>
+          <div class="plain-card"><span class="num">PROOF</span><h3>46 parity tests</h3><p>The simulation and the template agree on every rule and every rejection message. Run them with <span class="mono">npm run test:parity</span> from web/.</p></div>
+          <div class="plain-card"><span class="num">LIVE</span><h3>Not wired yet</h3><p>The live path via Sapient is out of scope for this build. The proof page works from published inputs and labels what is live versus sample.</p></div>
+        </div>
+        <div class="form-actions" style="margin-top: 24px;">
+          <button class="rui-btn" type="button" id="runWalkthrough">Run the guided walkthrough</button>
+          <button class="rui-btn rui-btn-ghost" type="button" id="resetSim">Reset</button>
+        </div>
+        <div class="rui-card mt-24">
+          <h3>Try a rejection</h3>
+          <p class="sec-note">Each button attempts a call the court must refuse, and shows the exact rejection message. These are deliberate rejections, not errors in the page.</p>
+          <div class="form-actions" style="margin-top: 12px;">
+            <button class="rui-btn rui-btn-sm" type="button" data-reject="delay">Open with delay 0</button>
+            <button class="rui-btn rui-btn-sm" type="button" data-reject="replace">Replace before the deadline</button>
+            <button class="rui-btn rui-btn-sm" type="button" data-reject="quorum">Settle with one vote</button>
+            <button class="rui-btn rui-btn-sm" type="button" data-reject="salt">Reveal with the wrong salt</button>
+            <button class="rui-btn rui-btn-sm" type="button" data-reject="fee">Appeal with the wrong fee</button>
+          </div>
+        </div>
+        <div id="simLog" style="margin-top: 24px;"></div>
+        <div class="rui-card mt-24">
+          <h3>Simulated state</h3>
+          <div id="simState"></div>
+        </div>
+      </div>
+    </section>`;
+  window.scrollTo(0, 0);
+  renderSimState(null, null);
+  document.getElementById("runWalkthrough").addEventListener("click", runWalkthrough);
+  document.getElementById("resetSim").addEventListener("click", () => {
+    const log = document.getElementById("simLog");
+    if (log) log.innerHTML = "";
+    window.__simCourt = null;
+    renderSimState(null, null);
+  });
+  document.querySelectorAll("[data-reject]").forEach((button) => {
+    button.addEventListener("click", () => runRejection(button.dataset.reject));
+  });
+}
+
 // ----- router -----
 
 function setActiveNav(route) {
@@ -735,6 +1001,11 @@ function route() {
   if (name === "juror") {
     renderJuror();
     setActiveNav("home");
+    return;
+  }
+  if (name === "simulate") {
+    renderSimulate();
+    setActiveNav("simulate");
     return;
   }
   page.innerHTML = HOME_HTML;
