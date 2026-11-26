@@ -1,5 +1,5 @@
 // Verdict simulation engine, mirrored rule for rule from
-// templates/verdict/src/lib.rs at 7cba57c.
+// templates/verdict/src/lib.rs at 64cbb43.
 //
 // This is a simulation, not a live court. It runs the full dispute
 // lifecycle in the browser with no wallet, no funds, and no chain: create,

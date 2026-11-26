@@ -1,4 +1,4 @@
-// Verdict shared rules, mirrored from templates/verdict/src/lib.rs at 7cba57c.
+// Verdict shared rules, mirrored from templates/verdict/src/lib.rs at 64cbb43.
 //
 // This module is pure logic with no DOM and no network. The browser app and
 // the Node test suite both import it, so the proof page recomputes exactly
