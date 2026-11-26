@@ -794,6 +794,25 @@ describe("evidence", () => {
     );
     assert.equal(court.dispute(disputeId).payerEvidence[0].sha256, sha256Hex("evidence-0"));
   });
+
+  test("an evidence hash that is not 32 bytes of hex is refused", () => {
+    const court = makeCourt(3);
+    const disputeId = openFunded(court);
+    assert.throws(
+      () => court.submitEvidence(disputeId, "payer", 0, 0, "deadbeef", "sample://a"),
+      /evidence hash must be 32 bytes of hex/,
+    );
+    assert.throws(
+      () => court.submitEvidence(disputeId, "payer", 0, 0, "not-hex-at-all", "sample://a"),
+      /evidence hash must be 32 bytes of hex/,
+    );
+    assert.throws(
+      () => court.submitEvidence(disputeId, "payer", 0, 0, 1234, "sample://a"),
+      /evidence hash must be 32 bytes of hex/,
+    );
+    const posted = court.submitEvidence(disputeId, "payer", 0, 0, sha256Hex("a"), "sample://a");
+    assert.equal(posted.sha256, sha256Hex("a"));
+  });
 });
 
 describe("commit and reveal", () => {
@@ -851,7 +870,7 @@ describe("commit and reveal", () => {
 describe("escrow rules", () => {
   test("a ruling executes at most once and returns both buckets in one call", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
-    escrow.freezeForDispute(0);
+    escrow.freezeForDispute(0, COURT_ID);
     assert.deepEqual(
       escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n], COURT_ID),
       [490000n, 10000n],
@@ -865,7 +884,7 @@ describe("escrow rules", () => {
 
   test("a ruling whose amounts do not sum to the vault is refused", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
-    escrow.freezeForDispute(0);
+    escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_PAY, [490000n, 9999n], COURT_ID),
       /must equal the vault balance/,
@@ -876,7 +895,7 @@ describe("escrow rules", () => {
 
   test("a refund that pays the payee is refused", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
-    escrow.freezeForDispute(0);
+    escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_REFUND, [1n, 499999n], COURT_ID),
       /refund pays the payee nothing/,
@@ -887,7 +906,7 @@ describe("escrow rules", () => {
 
   test("an invalid outcome is refused", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
-    escrow.freezeForDispute(0);
+    escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, 3, [490000n, 10000n], COURT_ID),
       /invalid ruling outcome/,
@@ -904,7 +923,7 @@ describe("escrow rules", () => {
     ];
     for (const [i, cell] of cells.entries()) {
       const escrow = new SimEscrow(`escrow-cell-${i}`, "payer", "payee", TOTAL);
-      escrow.freezeForDispute(0);
+      escrow.freezeForDispute(0, COURT_ID);
       assert.deepEqual(
         escrow.executeRuling(0, cell.outcome, cell.amounts, COURT_ID),
         cell.amounts,
@@ -916,7 +935,7 @@ describe("escrow rules", () => {
 
   test("ruling amounts must be a pair of whole amounts", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
-    escrow.freezeForDispute(0);
+    escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_PAY, 490000n, COURT_ID),
       /ruling amounts must be a pair of amounts/,
@@ -952,7 +971,28 @@ describe("escrow rules", () => {
 
   test("an unfunded escrow cannot freeze for a dispute", () => {
     const escrow = new SimEscrow("escrow-2", "payer", "payee", 0);
-    assert.throws(() => escrow.freezeForDispute(0), /escrow vault is empty/);
+    assert.throws(() => escrow.freezeForDispute(0, COURT_ID), /escrow vault is empty/);
+  });
+
+  test("a stranger cannot freeze an escrow", () => {
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    assert.throws(
+      () => escrow.freezeForDispute(0, "stranger"),
+      /only the court can freeze an escrow/,
+    );
+    assert.equal(escrow.frozen, false);
+    escrow.freezeForDispute(0, COURT_ID);
+    assert.equal(escrow.frozen, true);
+  });
+
+  test("omitting the caller is refused when freezing", () => {
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    assert.throws(
+      () => escrow.freezeForDispute(0),
+      /only the court can freeze an escrow/,
+    );
+    assert.equal(escrow.frozen, false);
+    assert.equal(escrow.vault, BigInt(TOTAL));
   });
 });
 
@@ -1213,7 +1253,7 @@ describe("reschedule cap", () => {
 describe("round 3: caller, delays, epochs, atomic settlement, close rules", () => {
   test("a stranger cannot execute a ruling", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
-    escrow.freezeForDispute(0);
+    escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n], "stranger"),
       /only the court can execute a ruling/,
@@ -1227,7 +1267,7 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
 
   test("omitting the caller is rejected", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
-    escrow.freezeForDispute(0);
+    escrow.freezeForDispute(0, COURT_ID);
     assert.throws(
       () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n]),
       /only the court can execute a ruling/,
@@ -1297,6 +1337,28 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
     assert.throws(
       () => open.openAppeal(disputeId, "payer", APPEAL_FEE, 2 ** 53),
       /delay must be a whole number/,
+    );
+  });
+
+  test("an epoch sum past the safe integer range is refused", () => {
+    const court = makeCourt();
+    court.fund("payer", 1000000);
+    court.createEscrow("escrow-0", "payer", "payee", TOTAL);
+    court.setEpoch(Number.MAX_SAFE_INTEGER - 1);
+    assert.throws(
+      () => court.openDispute("escrow-0", 2),
+      /epoch sum is outside the safe integer range/,
+    );
+    assert.equal(court.disputes.length, 0);
+    assert.equal(court.escrows.get("escrow-0").frozen, false);
+    court.setEpoch(0);
+    const disputeId = court.openDispute("escrow-0", DRAW_DELAY);
+    const { panel } = drawAt(court, disputeId);
+    rulePanel(court, disputeId, panel, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    court.setEpoch(Number.MAX_SAFE_INTEGER);
+    assert.throws(
+      () => court.replaceJury(disputeId, "payer", 1),
+      /epoch sum is outside the safe integer range/,
     );
   });
 

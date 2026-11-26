@@ -53,10 +53,13 @@ export function u64ToLeBytes(value) {
   let v;
   if (typeof value === "bigint") {
     v = value;
-  } else if (typeof value === "number" && Number.isInteger(value)) {
+  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
+    // A safe integer only: Number.isInteger would accept 2^53, whose
+    // conversion to BigInt preserves the already-rounded value, so
+    // distinct inputs could collapse into one.
     v = BigInt(value);
   } else {
-    throw new Error("u64 value must be a whole number");
+    throw new Error("u64 value must be a whole number within the safe integer range");
   }
   if (v < 0n || v > 0xffffffffffffffffn) throw new Error("u64 value out of range");
   const out = new Uint8Array(8);

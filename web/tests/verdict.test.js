@@ -330,6 +330,12 @@ describe("u64ToLeBytes", () => {
     );
     assert.deepEqual([...u64ToLeBytes(258)], [2, 1, 0, 0, 0, 0, 0, 0]);
   });
+
+  test("a number above the safe integer range is refused, not rounded", () => {
+    assert.throws(() => u64ToLeBytes(2 ** 53), /safe integer range/);
+    assert.throws(() => u64ToLeBytes(Number.MAX_SAFE_INTEGER + 1), /safe integer range/);
+    assert.deepEqual([...u64ToLeBytes(Number.MAX_SAFE_INTEGER)], [255, 255, 255, 255, 255, 255, 31, 0]);
+  });
 });
 
 describe("domain separation", () => {

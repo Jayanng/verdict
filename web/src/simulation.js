@@ -78,20 +78,36 @@ function validDelay(delay) {
   if (delay < MIN_DRAW_DELAY) fail("draw delay must be at least one epoch");
 }
 
+// An epoch sum must stay inside the safe integer range: two safe
+// integers can add past it, and the result would round, so distinct
+// epochs could collapse into one. Every epoch sum in the simulation
+// goes through here.
+function safeEpochSum(a, b) {
+  const sum = a + b;
+  if (!Number.isSafeInteger(sum)) {
+    fail("epoch sum is outside the safe integer range");
+  }
+  return sum;
+}
+
 function defaultEpochHash(epoch) {
   return sha256Hex(`verdict-sim-epoch-${epoch}`);
 }
 
 // One simulated escrow: a vault funded by the payer, frozen by a dispute,
-// executed at most once by the court. Only the court identity may execute
-// a ruling: any other caller is refused, the same way the real escrow
-// refuses every caller but the court named as arbitrator at creation.
+// executed at most once by the court. Only the court identity may freeze
+// an escrow or execute a ruling: any other caller is refused, the same
+// way the real escrow refuses every caller but the court named as
+// arbitrator at creation.
 // executeRuling takes the outcome and the amounts pair (payee amount,
 // payer amount), where the payer amount is gross, before the court takes
 // juror fees out of it, and returns both amounts in one call, so the
 // vault is empty after a ruling and no second call is needed.
 export class SimEscrow {
   constructor(id, payer, payee, principal, courtId = COURT_ID) {
+    if (typeof courtId !== "string" || courtId.length === 0) {
+      fail("court id must be a non-empty string");
+    }
     this.id = id;
     this.payer = payer;
     this.payee = payee;
@@ -103,7 +119,11 @@ export class SimEscrow {
     this.courtId = courtId;
   }
 
-  freezeForDispute(disputeId) {
+  // The caller must be passed explicitly: there is no default, so
+  // omitting it refuses the call instead of authenticating as the
+  // court. Only the court identity may freeze an escrow.
+  freezeForDispute(disputeId, caller) {
+    if (caller !== this.courtId) fail("only the court can freeze an escrow");
     if (this.vault <= 0n) fail("escrow vault is empty");
     if (this.frozen) fail("escrow already frozen for a dispute");
     this.frozen = true;
@@ -268,14 +288,14 @@ export class SimCourt {
     const disputeId = this.disputes.length;
     const openEpoch = this.epoch;
     const openEpochHash = this.epochHash(openEpoch);
-    const drawEpoch = openEpoch + drawDelay;
+    const drawEpoch = safeEpochSum(openEpoch, drawDelay);
     const eligiblePool = [...this.jurors.keys()];
     // All validation runs before the freeze: the simulation has no
     // rollback, so a failed opening must leave the escrow unfrozen.
     // The template freezes first and relies on the transaction rolling
     // back, which the simulation cannot do.
     if (eligiblePool.length < PANEL_SIZE) fail("not enough eligible jurors to draw a panel");
-    escrow.freezeForDispute(disputeId);
+    escrow.freezeForDispute(disputeId, this.courtId);
     this.disputes.push({
       id: disputeId,
       escrowId,
@@ -337,6 +357,16 @@ export class SimCourt {
     }
     const slot = side === 0 ? dispute.payerEvidence : dispute.payeeEvidence;
     if (slot[index] !== null) fail("evidence already posted at this index");
+    // The template takes the hash as a 32-byte hash type, so the
+    // simulation checks the same: a hash that is not 32 bytes of hex
+    // is refused with a defined message, not stored.
+    let hashBytes;
+    try {
+      hashBytes = hexToBytes(hash);
+    } catch {
+      fail("evidence hash must be 32 bytes of hex");
+    }
+    if (hashBytes.length !== 32) fail("evidence hash must be 32 bytes of hex");
     slot[index] = { side, index, sha256: hash, uri };
     return slot[index];
   }
@@ -357,10 +387,14 @@ export class SimCourt {
       DRAW_DOMAIN_FIRST,
       PANEL_SIZE,
     );
+    // The deadlines are computed before any state changes, so a
+    // refused sum leaves the dispute exactly as it was.
+    const revealDeadline = safeEpochSum(dispute.drawEpoch, REVEAL_WINDOW);
+    const commitDeadline = safeEpochSum(dispute.drawEpoch, 1);
     dispute.drawHash = drawHash;
     dispute.panel = indexes.map((i) => dispute.eligiblePool[i]);
-    dispute.revealDeadline = dispute.drawEpoch + REVEAL_WINDOW;
-    dispute.commitDeadline = dispute.drawEpoch + 1;
+    dispute.revealDeadline = revealDeadline;
+    dispute.commitDeadline = commitDeadline;
     dispute.drawn = true;
     return { drawHash, panel: [...dispute.panel] };
   }
@@ -372,7 +406,7 @@ export class SimCourt {
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
     if (this.epoch <= dispute.drawEpoch) fail("draw epoch has not passed yet");
     if (dispute.reschedules >= MAX_RESCHEDULES) fail("draw reschedule limit reached");
-    dispute.drawEpoch = this.epoch + 1;
+    dispute.drawEpoch = safeEpochSum(this.epoch, 1);
     dispute.reschedules += 1;
     return dispute.drawEpoch;
   }
@@ -418,12 +452,15 @@ export class SimCourt {
     if (this.epoch < dispute.revealDeadline) fail("reveal window has not passed yet");
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
+    // The new draw epoch is computed before any state changes, so a
+    // refused sum leaves the dispute exactly as it was.
+    const newDrawEpoch = safeEpochSum(this.epoch, drawDelay);
     dispute.failedJurors = dispute.panel.filter((key) => !dispute.reveals.has(key));
     dispute.panel = [];
     dispute.commits = new Map();
     dispute.reveals = new Map();
     dispute.round += 1;
-    dispute.drawEpoch = this.epoch + drawDelay;
+    dispute.drawEpoch = newDrawEpoch;
     dispute.drawn = false;
     dispute.replacementUsed = true;
     return dispute.drawEpoch;
@@ -601,12 +638,15 @@ export class SimCourt {
       fail("not enough eligible jurors to draw an appeal panel");
     }
     if (this.balance(caller) < feeAmount) fail("insufficient balance to post the appeal fee");
+    // The draw epoch is computed before any state changes, so a
+    // refused sum leaves the fee with the caller and the appeal unopened.
+    const appealDrawEpoch = safeEpochSum(this.epoch, drawDelay);
     this.balances.set(caller, this.balance(caller) - feeAmount);
     this.feeVault += feeAmount;
     dispute.appealed = true;
     dispute.appealFee = feeAmount;
     dispute.appellantAccount = caller;
-    dispute.appealDrawEpoch = this.epoch + drawDelay;
+    dispute.appealDrawEpoch = appealDrawEpoch;
     return dispute.appealDrawEpoch;
   }
 
@@ -632,10 +672,14 @@ export class SimCourt {
       DRAW_DOMAIN_APPEAL,
       APPEAL_PANEL_SIZE,
     );
+    // The deadlines are computed before any state changes, so a
+    // refused sum leaves the dispute exactly as it was.
+    const appealRevealDeadline = safeEpochSum(dispute.appealDrawEpoch, REVEAL_WINDOW);
+    const appealCommitDeadline = safeEpochSum(dispute.appealDrawEpoch, 1);
     dispute.appealDrawHash = drawHash;
     dispute.appealPanel = indexes.map((i) => pool[i]);
-    dispute.appealRevealDeadline = dispute.appealDrawEpoch + REVEAL_WINDOW;
-    dispute.appealCommitDeadline = dispute.appealDrawEpoch + 1;
+    dispute.appealRevealDeadline = appealRevealDeadline;
+    dispute.appealCommitDeadline = appealCommitDeadline;
     dispute.appealDrawn = true;
     return { drawHash, panel: [...dispute.appealPanel] };
   }
@@ -650,7 +694,7 @@ export class SimCourt {
     if (dispute.appealReschedules >= MAX_RESCHEDULES) {
       fail("appeal draw reschedule limit reached");
     }
-    dispute.appealDrawEpoch = this.epoch + 1;
+    dispute.appealDrawEpoch = safeEpochSum(this.epoch, 1);
     dispute.appealReschedules += 1;
     return dispute.appealDrawEpoch;
   }
@@ -701,6 +745,9 @@ export class SimCourt {
     }
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
+    // The new draw epoch is computed before any state changes, so a
+    // refused sum leaves the dispute exactly as it was.
+    const newAppealDrawEpoch = safeEpochSum(this.epoch, drawDelay);
     dispute.appealFailedJurors = dispute.appealPanel.filter(
       (key) => !dispute.appealReveals.has(key),
     );
@@ -708,7 +755,7 @@ export class SimCourt {
     dispute.appealCommits = new Map();
     dispute.appealReveals = new Map();
     dispute.appealRound += 1;
-    dispute.appealDrawEpoch = this.epoch + drawDelay;
+    dispute.appealDrawEpoch = newAppealDrawEpoch;
     dispute.appealDrawn = false;
     dispute.appealReplacementUsed = true;
     return dispute.appealDrawEpoch;
