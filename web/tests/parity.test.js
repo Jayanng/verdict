@@ -1,6 +1,6 @@
 // Parity tests: the simulation in src/simulation.js agrees with the
 // mirror in src/verdict.js and with the template rules in
-// templates/verdict/src/lib.rs at 278344b, on every rule and every
+// templates/verdict/src/lib.rs at 7cba57c, on every rule and every
 // rejection message. Run from web/:
 //   node --test tests/parity.test.js
 // The engine suite is the other half of the proof:
