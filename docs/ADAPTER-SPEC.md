@@ -32,7 +32,7 @@ withdraw_remainder()
   in the vault to the payer and returns it as a bucket, so a split or a
   refund never leaves funds locked in the vault. It refuses to run before
   a ruling has executed, and it runs at most once. When the ruling paid
-  the full balance, the remainder is zero and it returns an empty bucket.
+  full balance, the remainder is empty and it returns an empty bucket.
   The court deposits the payee bucket to the payee account and the
   remainder bucket to the payer account, so the vault is empty when the
   settlement finishes.

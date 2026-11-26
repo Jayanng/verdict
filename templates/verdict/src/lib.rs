@@ -20,6 +20,22 @@ mod verdict {
     const PANEL_SIZE: u64 = 3;
     /// Jurors drawn for an appeal ruling.
     const APPEAL_PANEL_SIZE: u64 = 7;
+    /// Minimum draw delay, in epochs. Every draw commits to a future
+    /// epoch at least one epoch ahead, so the draw never uses the
+    /// current epoch hash, which is already known when the dispute
+    /// opens.
+    const MIN_DRAW_DELAY: u64 = 1;
+    /// Reveal window, in epochs after the draw epoch. A drawn juror
+    /// has this long to reveal. A round can only be replaced once the
+    /// window has passed, so a replacement never lands while honest
+    /// jurors are still within their time to reveal.
+    const REVEAL_WINDOW: u64 = 2;
+    /// Draw domain folded into the panel derivation. The first round
+    /// draws with domain 0 and the appeal with domain 1, so the same
+    /// hash, pool, dispute, and round can never produce the same panel
+    /// across the two rounds.
+    const DRAW_DOMAIN_FIRST: u64 = 0;
+    const DRAW_DOMAIN_APPEAL: u64 = 1;
     /// Fee paid to each juror for one dispute, in micro-Tari.
     const JUROR_FEE: u64 = 5_000;
     /// Bond floor: at least twice the largest juror fee times the panel.
@@ -90,7 +106,7 @@ mod verdict {
         /// Public key of the juror the fee is owed to.
         pub juror: RistrettoPublicKeyBytes,
         /// Amount owed, in micro-Tari: the juror fee plus any slashed
-        /// bond share. Zero means no fee is owed.
+        /// bond share. A claim of 0 means no fee is owed.
         pub amount: u64,
         /// True once the juror has claimed the fee.
         pub claimed: bool,
@@ -107,6 +123,10 @@ mod verdict {
         pub draw_epoch: u64,
         /// Epoch hash read at draw time (the future epoch's hash).
         pub draw_hash: Hash32,
+        /// Last epoch of the reveal window, set at draw time to the
+        /// draw epoch plus REVEAL_WINDOW. A round can only be replaced
+        /// once the current epoch has reached this epoch.
+        pub reveal_deadline: u64,
         /// True once the draw has executed in E*.
         pub drawn: bool,
         /// True once the ruling has settled.
@@ -159,6 +179,9 @@ mod verdict {
         pub appeal_draw_epoch: u64,
         /// Epoch hash read at appeal draw time.
         pub appeal_draw_hash: Hash32,
+        /// Last epoch of the appeal reveal window, set at appeal draw
+        /// time to the appeal draw epoch plus REVEAL_WINDOW.
+        pub appeal_reveal_deadline: u64,
         /// True once the appeal draw has executed.
         pub appeal_drawn: bool,
         /// True once the one appeal replacement draw has been used.
@@ -216,9 +239,17 @@ mod verdict {
 
         /// Open a dispute: freeze the escrow via its own method, and lock
         /// the draw to the future epoch E* = current epoch + `draw_delay`.
-        /// Returns the dispute id. K is a caller-chosen delay, not a
-        /// constant, so small windows can be exercised in tests.
+        /// Returns the dispute id. The delay must be at least one epoch,
+        /// so the draw never uses the current epoch hash. The eligible
+        /// pool must already hold a full panel, so the escrow never
+        /// freezes into a dispute that cannot draw. K is a caller-chosen
+        /// delay, not a constant, so small windows can be exercised in
+        /// tests.
         pub fn open_dispute(&mut self, escrow: ComponentAddress, draw_delay: u64) -> u64 {
+            assert!(
+                draw_delay >= MIN_DRAW_DELAY,
+                "draw delay must be at least one epoch"
+            );
             let dispute_id = self.disputes.len() as u64;
             let open_epoch = Consensus::current_epoch();
             let open_epoch_hash = Consensus::current_epoch_hash();
@@ -230,12 +261,19 @@ mod verdict {
             let eligible_pool: Vec<RistrettoPublicKeyBytes> =
                 self.jurors.iter().map(|j| j.key).collect();
             ComponentManager::get(escrow).invoke("freeze_for_dispute", args![dispute_id]);
+            // Checked after the freeze, so the escrow's own empty-vault
+            // rejection still runs first on an unfunded escrow.
+            assert!(
+                eligible_pool.len() as u64 >= PANEL_SIZE,
+                "not enough eligible jurors to draw a panel"
+            );
             self.disputes.push(Dispute {
                 escrow,
                 open_epoch,
                 open_epoch_hash,
                 draw_epoch,
                 draw_hash: Hash32::from([0u8; 32]),
+                reveal_deadline: 0,
                 drawn: false,
                 settled: false,
                 closed_no_ruling: false,
@@ -259,6 +297,7 @@ mod verdict {
                 appeal_fee: 0,
                 appeal_draw_epoch: 0,
                 appeal_draw_hash: Hash32::from([0u8; 32]),
+                appeal_reveal_deadline: 0,
                 appeal_drawn: false,
                 appeal_replacement_used: false,
                 appeal_round: 0,
@@ -317,6 +356,10 @@ mod verdict {
             {
                 let dispute = self.dispute(dispute_id);
                 assert!(!dispute.drawn, "jury already drawn for this dispute");
+                assert!(
+                    dispute.eligible_pool.len() as u64 >= PANEL_SIZE,
+                    "not enough eligible jurors to draw a panel"
+                );
                 assert_eq!(
                     Consensus::current_epoch(),
                     dispute.draw_epoch,
@@ -332,19 +375,27 @@ mod verdict {
                     dispute_id,
                     dispute.round,
                     PANEL_SIZE,
+                    DRAW_DOMAIN_FIRST,
                 )
             };
+            let deadline = Consensus::current_epoch()
+                .checked_add(REVEAL_WINDOW)
+                .expect("reveal deadline overflows epoch range");
             let dispute = self.dispute_mut(dispute_id);
             dispute.draw_hash = hash;
             dispute.drawn = true;
+            dispute.reveal_deadline = deadline;
             dispute.panel = panel;
             hash
         }
 
         /// Reschedule a missed draw: if the locked draw epoch has passed
-        /// without a draw, move the commitment to the next epoch. The
-        /// reschedule is recorded on chain, so it cannot happen quietly.
-        /// Callable as often as the window keeps being missed.
+        /// without a draw, move the commitment past the current epoch.
+        /// The new draw epoch is the current epoch plus one, never the
+        /// current epoch itself, so the rescheduled draw still uses a
+        /// future epoch hash. The reschedule is recorded on chain, so
+        /// it cannot happen quietly. Callable as often as the window
+        /// keeps being missed.
         pub fn reschedule_draw(&mut self, dispute_id: u64) {
             let dispute = self.dispute_mut(dispute_id);
             assert!(!dispute.drawn, "jury already drawn for this dispute");
@@ -354,8 +405,7 @@ mod verdict {
                 Consensus::current_epoch() > dispute.draw_epoch,
                 "draw epoch has not passed yet"
             );
-            dispute.draw_epoch = dispute
-                .draw_epoch
+            dispute.draw_epoch = Consensus::current_epoch()
                 .checked_add(1)
                 .expect("draw epoch overflow");
             dispute.reschedules = dispute
@@ -367,12 +417,31 @@ mod verdict {
         /// Record a failed round and commit a new future epoch for the
         /// replacement draw. Allowed once per dispute, only when the drawn
         /// round cannot produce a ruling: some drawn juror has not
-        /// revealed, and no outcome holds a majority of the reveals. The
-        /// jurors who did not reveal are recorded as failed; they are
-        /// slashed when the dispute settles or closes. The panel,
-        /// commits, and reveals are cleared, the round nonce advances,
-        /// and the next draw executes only in the new locked epoch.
+        /// revealed, and no outcome holds a majority of the reveals. Only
+        /// a party to the dispute can call it, and only once the reveal
+        /// window has passed, so no replacement can land while honest
+        /// jurors are still within their time to reveal. The delay must
+        /// be at least one epoch, so the replacement draw still uses a
+        /// future epoch hash. The jurors who did not reveal are recorded
+        /// as failed; they are slashed when the dispute settles or
+        /// closes. The panel, commits, and reveals are cleared, the round
+        /// nonce advances, and the next draw executes only in the new
+        /// locked epoch.
         pub fn replace_jury(&mut self, dispute_id: u64, draw_delay: u64) {
+            assert!(
+                draw_delay >= MIN_DRAW_DELAY,
+                "draw delay must be at least one epoch"
+            );
+            let signer = CallerContext::transaction_signer_public_key();
+            let escrow = self.dispute(dispute_id).escrow;
+            let payer: RistrettoPublicKeyBytes =
+                ComponentManager::get(escrow).call("payer", args![]);
+            let payee: RistrettoPublicKeyBytes =
+                ComponentManager::get(escrow).call("payee", args![]);
+            assert!(
+                signer == payer || signer == payee,
+                "only a party to the dispute can replace the jury"
+            );
             {
                 let dispute = self.dispute(dispute_id);
                 assert!(dispute.drawn, "jury not drawn for this dispute");
@@ -380,6 +449,10 @@ mod verdict {
                 assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
                 assert!(!dispute.appealed, "dispute is under appeal");
                 assert!(!dispute.replacement_used, "replacement already used");
+                assert!(
+                    Consensus::current_epoch() >= dispute.reveal_deadline,
+                    "reveal window has not passed yet"
+                );
                 assert!(
                     dispute.reveals.len() < dispute.panel.len(),
                     "round is fully revealed"
@@ -540,7 +613,7 @@ mod verdict {
                     net.checked_add(1)
                         .expect("split amount overflow")
                         .checked_div(2)
-                        .expect("split division by zero")
+                        .expect("split division failed")
                 }
             };
             assert!(
@@ -653,7 +726,9 @@ mod verdict {
         /// appellant, with a fresh future-epoch draw of seven jurors.
         /// Only a party to the dispute can appeal, only after the first
         /// round has reached a majority ruling, and only before the
-        /// dispute settles. The fee is exactly APPEAL_FEE in TARI.
+        /// dispute settles. The fee is exactly APPEAL_FEE in TARI. The
+        /// delay must be at least one epoch, and the eligible pool must
+        /// already hold a full appeal panel of seven jurors.
         pub fn open_appeal(
             &mut self,
             dispute_id: u64,
@@ -661,6 +736,10 @@ mod verdict {
             fee: Bucket,
             appellant_account: ComponentAddress,
         ) {
+            assert!(
+                draw_delay >= MIN_DRAW_DELAY,
+                "draw delay must be at least one epoch"
+            );
             let signer = CallerContext::transaction_signer_public_key();
             let escrow = self.dispute(dispute_id).escrow;
             let payer: RistrettoPublicKeyBytes =
@@ -693,6 +772,10 @@ mod verdict {
                     Self::majority_outcome(&dispute.reveals, dispute.panel.len() as u64).is_some(),
                     "first round has no majority ruling to appeal"
                 );
+                assert!(
+                    dispute.eligible_pool.len() as u64 >= APPEAL_PANEL_SIZE,
+                    "not enough eligible jurors to draw an appeal panel"
+                );
             }
             let now = Consensus::current_epoch();
             self.fee_vault.deposit(fee);
@@ -711,7 +794,9 @@ mod verdict {
 
         /// Execute the appeal jury draw. Only during the locked appeal
         /// draw epoch, only once. Same derivation as the first draw,
-        /// with a seven-juror panel and a fresh round nonce.
+        /// with a seven-juror panel and a fresh round nonce, in the
+        /// appeal draw domain, so the appeal panel can never match a
+        /// first-round panel drawn from the same hash.
         pub fn draw_appeal_jury(&mut self, dispute_id: u64) -> Hash32 {
             {
                 let dispute = self.dispute(dispute_id);
@@ -719,6 +804,10 @@ mod verdict {
                 assert!(!dispute.appeal_drawn, "appeal jury already drawn");
                 assert!(!dispute.settled, "dispute already settled");
                 assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
+                assert!(
+                    dispute.eligible_pool.len() as u64 >= APPEAL_PANEL_SIZE,
+                    "not enough eligible jurors to draw an appeal panel"
+                );
                 assert_eq!(
                     Consensus::current_epoch(),
                     dispute.appeal_draw_epoch,
@@ -734,17 +823,24 @@ mod verdict {
                     dispute_id,
                     dispute.appeal_round,
                     APPEAL_PANEL_SIZE,
+                    DRAW_DOMAIN_APPEAL,
                 )
             };
+            let deadline = Consensus::current_epoch()
+                .checked_add(REVEAL_WINDOW)
+                .expect("appeal reveal deadline overflows epoch range");
             let dispute = self.dispute_mut(dispute_id);
             dispute.appeal_draw_hash = hash;
             dispute.appeal_drawn = true;
+            dispute.appeal_reveal_deadline = deadline;
             dispute.appeal_panel = panel;
             hash
         }
 
-        /// Reschedule a missed appeal draw to the next epoch, recorded
-        /// on chain like the first-round reschedule.
+        /// Reschedule a missed appeal draw past the current epoch,
+        /// recorded on chain like the first-round reschedule. The new
+        /// appeal draw epoch is the current epoch plus one, never the
+        /// current epoch itself.
         pub fn reschedule_appeal_draw(&mut self, dispute_id: u64) {
             let dispute = self.dispute_mut(dispute_id);
             assert!(dispute.appealed, "no appeal opened for this dispute");
@@ -755,8 +851,7 @@ mod verdict {
                 Consensus::current_epoch() > dispute.appeal_draw_epoch,
                 "appeal draw epoch has not passed yet"
             );
-            dispute.appeal_draw_epoch = dispute
-                .appeal_draw_epoch
+            dispute.appeal_draw_epoch = Consensus::current_epoch()
                 .checked_add(1)
                 .expect("appeal draw epoch overflow");
             dispute.appeal_reschedules = dispute
@@ -815,8 +910,23 @@ mod verdict {
         /// for the appeal replacement draw. Same rule as the first
         /// round: once per appeal, only when the drawn appeal round
         /// cannot produce a ruling, with the jurors who did not reveal
-        /// recorded as failed.
+        /// recorded as failed. Only a party to the dispute can call it,
+        /// and only once the appeal reveal window has passed.
         pub fn replace_appeal_jury(&mut self, dispute_id: u64, draw_delay: u64) {
+            assert!(
+                draw_delay >= MIN_DRAW_DELAY,
+                "draw delay must be at least one epoch"
+            );
+            let signer = CallerContext::transaction_signer_public_key();
+            let escrow = self.dispute(dispute_id).escrow;
+            let payer: RistrettoPublicKeyBytes =
+                ComponentManager::get(escrow).call("payer", args![]);
+            let payee: RistrettoPublicKeyBytes =
+                ComponentManager::get(escrow).call("payee", args![]);
+            assert!(
+                signer == payer || signer == payee,
+                "only a party to the dispute can replace the appeal jury"
+            );
             {
                 let dispute = self.dispute(dispute_id);
                 assert!(dispute.appealed, "no appeal opened for this dispute");
@@ -826,6 +936,10 @@ mod verdict {
                 assert!(
                     !dispute.appeal_replacement_used,
                     "appeal replacement already used"
+                );
+                assert!(
+                    Consensus::current_epoch() >= dispute.appeal_reveal_deadline,
+                    "appeal reveal window has not passed yet"
                 );
                 assert!(
                     dispute.appeal_reveals.len() < dispute.appeal_panel.len(),
@@ -869,7 +983,7 @@ mod verdict {
         /// the replacement draw has been used and the new round still
         /// has no majority, or a round is fully revealed with no
         /// majority, including an appeal round. The ruling executes with
-        /// a zero payee amount, which unfreezes the escrow, and the
+        /// a payee amount of 0, which unfreezes the escrow, and the
         /// whole principal returns to the payer: the opener's fee is
         /// refunded in full, no juror fee is taken. Jurors who were
         /// drawn and did not reveal are slashed, and the forfeited
@@ -917,8 +1031,9 @@ mod verdict {
                 dispute.escrow
             };
             let principal: u64 = ComponentManager::get(escrow).call("vault_balance", args![]);
-            // A zero ruling unfreezes the escrow; the remainder is the
-            // whole principal, and it all returns to the payer.
+            // A ruling with a payee amount of 0 unfreezes the escrow;
+            // the remainder is the whole principal, and it all returns
+            // to the payer.
             let payee_bucket: Bucket =
                 ComponentManager::get(escrow).call("execute_ruling", args![dispute_id, 0u64]);
             let remainder_bucket: Bucket =
@@ -931,7 +1046,7 @@ mod verdict {
                 .amount()
                 .to_u64_checked()
                 .expect("remainder bucket amount out of range");
-            assert_eq!(payee_moved, 0, "no-ruling payee amount must be zero");
+            assert_eq!(payee_moved, 0, "no-ruling payee amount must be 0");
             assert_eq!(
                 remainder_moved, principal,
                 "no-ruling remainder must be the whole principal"
@@ -1099,6 +1214,11 @@ mod verdict {
             self.dispute(dispute_id).reschedules
         }
 
+        /// Times the appeal draw was rescheduled after its locked epoch passed.
+        pub fn dispute_appeal_reschedules(&self, dispute_id: u64) -> u64 {
+            self.dispute(dispute_id).appeal_reschedules
+        }
+
         /// True once an appeal has been opened on this dispute.
         pub fn dispute_appealed(&self, dispute_id: u64) -> bool {
             self.dispute(dispute_id).appealed
@@ -1143,7 +1263,7 @@ mod verdict {
             self.dispute(dispute_id).appeal_reveals.len() as u64
         }
 
-        /// Fee owed to one juror for a dispute, in micro-Tari. Zero
+        /// Fee owed to one juror for a dispute, in micro-Tari. 0
         /// when the juror is owed nothing.
         pub fn dispute_claim(&self, dispute_id: u64, juror: RistrettoPublicKeyBytes) -> u64 {
             self.dispute(dispute_id)
@@ -1169,6 +1289,23 @@ mod verdict {
         /// inputs: draw hash, dispute id, round, and the frozen pool.
         pub fn dispute_round(&self, dispute_id: u64) -> u64 {
             self.dispute(dispute_id).round
+        }
+
+        /// Last epoch of the reveal window for a dispute, set at draw
+        /// time. A round can only be replaced once the current epoch
+        /// has reached this epoch.
+        pub fn dispute_reveal_deadline(&self, dispute_id: u64) -> u64 {
+            self.dispute(dispute_id).reveal_deadline
+        }
+
+        /// Last epoch of the appeal reveal window for a dispute.
+        pub fn dispute_appeal_reveal_deadline(&self, dispute_id: u64) -> u64 {
+            self.dispute(dispute_id).appeal_reveal_deadline
+        }
+
+        /// Appeal draw round nonce, 0 for the first appeal draw.
+        pub fn dispute_appeal_round(&self, dispute_id: u64) -> u64 {
+            self.dispute(dispute_id).appeal_round
         }
 
         /// Length of the frozen eligible pool for a dispute.
@@ -1445,17 +1582,22 @@ mod verdict {
         }
 
         /// Derive the panel from the drawn hash, the dispute id, the draw
-        /// round, and the frozen eligible pool. For each slot, read an
+        /// round, the draw domain, and the frozen eligible pool. The
+        /// domain separates the first round (0) from the appeal (1):
+        /// the same hash, pool, dispute, and round never produce the
+        /// same panel across the two rounds. For each slot, read an
         /// 8-byte window of the hash, fold in the dispute id, the round,
-        /// and the slot, and take the result modulo the pool size,
-        /// probing forward until an unpicked juror is found. Returns at
-        /// most `target_size` jurors, fewer when the pool is smaller.
+        /// the domain, and the slot, and take the result modulo the pool
+        /// size, probing forward until an unpicked juror is found.
+        /// Returns at most `target_size` jurors, fewer when the pool is
+        /// smaller.
         fn derive_panel(
             pool: &[RistrettoPublicKeyBytes],
             draw_hash: Hash32,
             dispute_id: u64,
             round: u64,
             target_size: u64,
+            domain: u64,
         ) -> Vec<RistrettoPublicKeyBytes> {
             let pool_len = pool.len() as u64;
             if pool_len == 0 {
@@ -1474,6 +1616,7 @@ mod verdict {
                 let mut candidate = (value
                     .wrapping_add(dispute_id)
                     .wrapping_add(round)
+                    .wrapping_add(domain)
                     .wrapping_add(slot))
                     % pool_len;
                 while panel.contains(&pool[candidate as usize]) {

@@ -433,7 +433,7 @@ mod milestone_escrow {
         /// arbitrator, only once, only after a ruling has executed. The
         /// court calls this right after execute_ruling, so a split or a
         /// refund never leaves funds locked in the vault. If the ruling
-        /// paid the full balance, the remainder is zero and this returns
+        /// paid the full balance, the remainder is empty and this returns
         /// an empty bucket.
         pub fn withdraw_remainder(&mut self) -> Bucket {
             self.assert_arbitrator();

@@ -471,6 +471,9 @@ fn evidence_over_limit_rejected() {
     let mut setup = make_setup();
     let payer_secret = setup.payer.secret.clone();
     fund(&mut setup, TOTAL);
+    let floor = bond_floor(&mut setup.test, setup.verdict);
+    let jurors = create_jurors(&mut setup.test, 3);
+    register_jurors(&mut setup, &jurors, floor);
     let dispute_id = open_dispute(&mut setup, &payer_secret);
     // The payer posts all 3 items.
     let payer = setup.payer.clone();
@@ -509,6 +512,9 @@ fn changing_posted_evidence_rejected() {
     let mut setup = make_setup();
     let payer_secret = setup.payer.secret.clone();
     fund(&mut setup, TOTAL);
+    let floor = bond_floor(&mut setup.test, setup.verdict);
+    let jurors = create_jurors(&mut setup.test, 3);
+    register_jurors(&mut setup, &jurors, floor);
     let dispute_id = open_dispute(&mut setup, &payer_secret);
     let payer = setup.payer.clone();
     submit_evidence(
@@ -557,6 +563,9 @@ fn stranger_cannot_submit_evidence() {
     let payer_secret = setup.payer.secret.clone();
     let stranger_secret = setup.stranger.secret.clone();
     fund(&mut setup, TOTAL);
+    let floor = bond_floor(&mut setup.test, setup.verdict);
+    let jurors = create_jurors(&mut setup.test, 3);
+    register_jurors(&mut setup, &jurors, floor);
     let dispute_id = open_dispute(&mut setup, &payer_secret);
     let verdict = setup.verdict;
     let reason = setup.test.execute_expect_failure(

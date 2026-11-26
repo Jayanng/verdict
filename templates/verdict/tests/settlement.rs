@@ -1,4 +1,4 @@
-// Engine tests for Phase 3: the settlement matrix, juror fees and
+// Engine tests: the settlement matrix, juror fees and
 // slashing, the appeal path, the replacement draw, and the bounded
 // no-ruling fallback.
 //
@@ -20,6 +20,7 @@ use tari_template_test_tooling::{support::assert_error::assert_reject_reason, Te
 
 const TOTAL: u64 = 500_000;
 const DRAW_DELAY: u64 = 2;
+const REVEAL_WINDOW: u64 = 2;
 const MILESTONE_AMOUNTS: [u64; 2] = [200_000, 300_000];
 const DEADLINE: u64 = 100;
 const JUROR_FEE: u64 = 5_000;
@@ -810,7 +811,11 @@ fn replacement_draw_recovers_after_no_show() {
     );
     let failed_key = panel[2];
 
-    // Record the failure: the replacement commits a new future epoch.
+    // The reveal window must pass first: the replacement commits a new
+    // future epoch, and it cannot land while honest jurors are still
+    // within their time to reveal. The draw was at epoch 2, so the
+    // deadline is epoch 4, and the replacement draw locks to epoch 6.
+    set_epoch(&mut setup.test, DRAW_DELAY + REVEAL_WINDOW);
     let verdict = setup.verdict;
     setup.test.execute_expect_success(
         setup
@@ -833,10 +838,10 @@ fn replacement_draw_recovers_after_no_show() {
         args![dispute_id],
         vec![],
     );
-    assert_eq!(draw_epoch, DRAW_DELAY + DRAW_DELAY);
+    assert_eq!(draw_epoch, DRAW_DELAY + REVEAL_WINDOW + DRAW_DELAY);
 
     // Draw again in the new epoch, rule with a pay majority, settle.
-    set_epoch(&mut setup.test, DRAW_DELAY + DRAW_DELAY);
+    set_epoch(&mut setup.test, DRAW_DELAY + REVEAL_WINDOW + DRAW_DELAY);
     set_epoch_hash(&mut setup.test, hash_of(0xE4));
     setup.test.execute_expect_success(
         setup
@@ -909,6 +914,8 @@ fn no_ruling_fallback_returns_principal() {
     let panel = draw_panel(&mut setup, dispute_id);
     // One juror reveals pay, the other two never reveal: no quorum.
     rule_panel_partial(&mut setup, &jurors, dispute_id, &panel, &[VOTE_PAY]);
+    // The reveal window must pass before the replacement can run.
+    set_epoch(&mut setup.test, DRAW_DELAY + REVEAL_WINDOW);
     let verdict = setup.verdict;
     setup.test.execute_expect_success(
         setup
@@ -919,7 +926,7 @@ fn no_ruling_fallback_returns_principal() {
         vec![],
     );
     // Second round: one juror reveals refund, the rest stay silent.
-    set_epoch(&mut setup.test, DRAW_DELAY + DRAW_DELAY);
+    set_epoch(&mut setup.test, DRAW_DELAY + REVEAL_WINDOW + DRAW_DELAY);
     set_epoch_hash(&mut setup.test, hash_of(0xE4));
     setup.test.execute_expect_success(
         setup
@@ -1028,7 +1035,9 @@ fn reschedule_draw_after_missed_window() {
     );
     assert_eq!(draw_epoch, DRAW_DELAY);
 
-    // The locked epoch passes without a draw: reschedule to the next.
+    // The locked epoch passes without a draw: reschedule past the
+    // current epoch, never onto it. The draw was locked to epoch 2, the
+    // current epoch is 3, so the new draw epoch is 4.
     set_epoch(&mut setup.test, DRAW_DELAY + 1);
     let verdict = setup.verdict;
     setup.test.execute_expect_success(
@@ -1045,7 +1054,7 @@ fn reschedule_draw_after_missed_window() {
         args![dispute_id],
         vec![],
     );
-    assert_eq!(draw_epoch, DRAW_DELAY + 1);
+    assert_eq!(draw_epoch, DRAW_DELAY + 2);
     let reschedules: u64 = setup.test.call_method(
         setup.verdict,
         "dispute_reschedules",
@@ -1055,6 +1064,7 @@ fn reschedule_draw_after_missed_window() {
     assert_eq!(reschedules, 1);
 
     // The draw now executes in the rescheduled epoch.
+    set_epoch(&mut setup.test, DRAW_DELAY + 2);
     set_epoch_hash(&mut setup.test, hash_of(0xE2));
     setup.test.execute_expect_success(
         setup
@@ -1254,7 +1264,8 @@ fn appeal_overturns_first_ruling() {
 fn appeal_guards_reject_bad_fee_stranger_and_double_appeal() {
     let mut setup = make_setup();
     fund(&mut setup, TOTAL);
-    let jurors = register_jurors(&mut setup, 3);
+    // Seven jurors, so the appeal can draw a full panel of seven.
+    let jurors = register_jurors(&mut setup, 7);
     let payer_secret = setup.payer.secret.clone();
     let (dispute_id, _panel) =
         dispute_with_ruling(&mut setup, &jurors, &[VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
@@ -1372,4 +1383,500 @@ fn appeal_after_settlement_rejected() {
         vec![payer_proof],
     );
     assert_reject_reason(&reason, "already settled");
+}
+
+// ----- draw delay, reveal window, pool size, draw domain -----
+
+/// Rule the appeal with the given votes for the first `votes.len()`
+/// appeal panel jurors only, leaving the rest unrevealed.
+fn rule_appeal_panel_partial(setup: &mut Setup, jurors: &[Party], dispute_id: u64, votes: &[u64]) {
+    let panel = appeal_panel_keys(setup, dispute_id);
+    for (i, vote) in votes.iter().enumerate() {
+        let key = panel[i];
+        let juror = jurors
+            .iter()
+            .find(|j| j.pk_bytes() == key)
+            .expect("drawn appeal juror not found");
+        let salt = hash_of((i + 11) as u8);
+        let commitment = vote_commitment(*vote, salt, dispute_id, key);
+        commit_appeal_vote(setup, juror, dispute_id, commitment);
+        reveal_appeal_vote(setup, juror, dispute_id, *vote, salt);
+    }
+}
+
+/// Open a dispute, rule the first round pay two to one, open an appeal,
+/// and draw the appeal panel. Returns the dispute id, the first panel,
+/// and the appeal panel.
+fn dispute_with_appeal_drawn(
+    setup: &mut Setup,
+    jurors: &[Party],
+) -> (
+    u64,
+    Vec<RistrettoPublicKeyBytes>,
+    Vec<RistrettoPublicKeyBytes>,
+) {
+    let (dispute_id, first_panel) =
+        dispute_with_ruling(setup, jurors, &[VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    let payer = setup.payer.clone();
+    open_appeal(setup, &payer, dispute_id, APPEAL_FEE);
+    let appeal_panel = draw_appeal_panel(setup, dispute_id);
+    (dispute_id, first_panel, appeal_panel)
+}
+
+fn appeal_draw_epoch(setup: &mut Setup, dispute_id: u64) -> u64 {
+    setup.test.call_method(
+        setup.verdict,
+        "dispute_appeal_draw_epoch",
+        args![dispute_id],
+        vec![],
+    )
+}
+
+fn reveal_deadline(setup: &mut Setup, dispute_id: u64) -> u64 {
+    setup.test.call_method(
+        setup.verdict,
+        "dispute_reveal_deadline",
+        args![dispute_id],
+        vec![],
+    )
+}
+
+fn appeal_reveal_deadline(setup: &mut Setup, dispute_id: u64) -> u64 {
+    setup.test.call_method(
+        setup.verdict,
+        "dispute_appeal_reveal_deadline",
+        args![dispute_id],
+        vec![],
+    )
+}
+
+#[test]
+fn open_dispute_zero_delay_rejected() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let _jurors = register_jurors(&mut setup, 3);
+    let payer_secret = setup.payer.secret.clone();
+    let verdict = setup.verdict;
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "open_dispute", args![setup.escrow, 0u64])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "draw delay must be at least one epoch");
+}
+
+#[test]
+fn replace_jury_zero_delay_rejected() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 3);
+    let payer_secret = setup.payer.secret.clone();
+    let dispute_id = open_dispute(&mut setup, &payer_secret);
+    let panel = draw_panel(&mut setup, dispute_id);
+    rule_panel_partial(&mut setup, &jurors, dispute_id, &panel, &[VOTE_PAY]);
+    // The reveal window has passed, but the delay itself is still 0.
+    let deadline = reveal_deadline(&mut setup, dispute_id);
+    set_epoch(&mut setup.test, deadline);
+    let verdict = setup.verdict;
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "replace_jury", args![dispute_id, 0u64])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "draw delay must be at least one epoch");
+}
+
+#[test]
+fn open_appeal_zero_delay_rejected() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 7);
+    let payer_secret = setup.payer.secret.clone();
+    let (dispute_id, _panel) =
+        dispute_with_ruling(&mut setup, &jurors, &[VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    let verdict = setup.verdict;
+    let payer = setup.payer.clone();
+    let payer_proof = payer.proof.clone();
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(payer.account, "withdraw", args![TARI_TOKEN, APPEAL_FEE])
+            .put_last_instruction_output_on_workspace("appeal_fee")
+            .call_method(
+                verdict,
+                "open_appeal",
+                args![dispute_id, 0u64, Workspace("appeal_fee"), payer.account],
+            )
+            .build_and_seal(&payer_secret),
+        vec![payer_proof],
+    );
+    assert_reject_reason(&reason, "draw delay must be at least one epoch");
+}
+
+#[test]
+fn replace_appeal_jury_zero_delay_rejected() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 7);
+    let payer_secret = setup.payer.secret.clone();
+    let (dispute_id, _first, _appeal) = dispute_with_appeal_drawn(&mut setup, &jurors);
+    // Three refund, three pay, one silent: no majority, and the appeal
+    // reveal window has passed.
+    rule_appeal_panel_partial(
+        &mut setup,
+        &jurors,
+        dispute_id,
+        &[
+            VOTE_REFUND,
+            VOTE_REFUND,
+            VOTE_REFUND,
+            VOTE_PAY,
+            VOTE_PAY,
+            VOTE_PAY,
+        ],
+    );
+    let deadline = appeal_reveal_deadline(&mut setup, dispute_id);
+    set_epoch(&mut setup.test, deadline);
+    let verdict = setup.verdict;
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "replace_appeal_jury", args![dispute_id, 0u64])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "draw delay must be at least one epoch");
+}
+
+#[test]
+fn replace_jury_rejected_before_reveal_deadline() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 3);
+    let payer_secret = setup.payer.secret.clone();
+    let dispute_id = open_dispute(&mut setup, &payer_secret);
+    let panel = draw_panel(&mut setup, dispute_id);
+    rule_panel_partial(&mut setup, &jurors, dispute_id, &panel, &[VOTE_PAY]);
+    // Still inside the reveal window: the draw was at epoch 2 and the
+    // deadline is epoch 4, so a replacement now would catch jurors who
+    // still have time to reveal.
+    let deadline = reveal_deadline(&mut setup, dispute_id);
+    assert_eq!(deadline, DRAW_DELAY + REVEAL_WINDOW);
+    let verdict = setup.verdict;
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "replace_jury", args![dispute_id, DRAW_DELAY])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "reveal window has not passed yet");
+}
+
+#[test]
+fn replace_jury_rejected_for_stranger() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 3);
+    let payer_secret = setup.payer.secret.clone();
+    let dispute_id = open_dispute(&mut setup, &payer_secret);
+    let panel = draw_panel(&mut setup, dispute_id);
+    rule_panel_partial(&mut setup, &jurors, dispute_id, &panel, &[VOTE_PAY]);
+    // The window has passed, but a stranger still cannot force a
+    // replacement: only a party to the dispute can.
+    set_epoch(&mut setup.test, DRAW_DELAY + REVEAL_WINDOW);
+    let verdict = setup.verdict;
+    let stranger = setup.stranger.clone();
+    let stranger_secret = stranger.secret.clone();
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "replace_jury", args![dispute_id, DRAW_DELAY])
+            .build_and_seal(&stranger_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "only a party to the dispute can replace the jury");
+}
+
+#[test]
+fn replace_appeal_jury_rejected_before_reveal_deadline() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 7);
+    let payer_secret = setup.payer.secret.clone();
+    let (dispute_id, _first, _appeal) = dispute_with_appeal_drawn(&mut setup, &jurors);
+    rule_appeal_panel_partial(
+        &mut setup,
+        &jurors,
+        dispute_id,
+        &[VOTE_REFUND, VOTE_REFUND, VOTE_REFUND],
+    );
+    // Still inside the appeal reveal window.
+    let deadline = appeal_reveal_deadline(&mut setup, dispute_id);
+    assert_eq!(
+        deadline,
+        appeal_draw_epoch(&mut setup, dispute_id) + REVEAL_WINDOW
+    );
+    let verdict = setup.verdict;
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(
+                verdict,
+                "replace_appeal_jury",
+                args![dispute_id, DRAW_DELAY],
+            )
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "appeal reveal window has not passed yet");
+}
+
+#[test]
+fn replace_appeal_jury_rejected_for_stranger() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 7);
+    let (dispute_id, _first, _appeal) = dispute_with_appeal_drawn(&mut setup, &jurors);
+    rule_appeal_panel_partial(
+        &mut setup,
+        &jurors,
+        dispute_id,
+        &[VOTE_REFUND, VOTE_REFUND, VOTE_REFUND],
+    );
+    let deadline = appeal_reveal_deadline(&mut setup, dispute_id);
+    set_epoch(&mut setup.test, deadline);
+    let verdict = setup.verdict;
+    let stranger = setup.stranger.clone();
+    let stranger_secret = stranger.secret.clone();
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(
+                verdict,
+                "replace_appeal_jury",
+                args![dispute_id, DRAW_DELAY],
+            )
+            .build_and_seal(&stranger_secret),
+        vec![],
+    );
+    assert_reject_reason(
+        &reason,
+        "only a party to the dispute can replace the appeal jury",
+    );
+}
+
+#[test]
+fn appeal_replacement_recovers_after_no_show() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 7);
+    let payer_secret = setup.payer.secret.clone();
+    let payee_before = balance(&mut setup.test, &setup.payee);
+    let payer_before = balance(&mut setup.test, &setup.payer);
+    let (dispute_id, _first, _appeal) = dispute_with_appeal_drawn(&mut setup, &jurors);
+    // Three refund, three pay, one silent: no majority, and the appeal
+    // round has failed.
+    rule_appeal_panel_partial(
+        &mut setup,
+        &jurors,
+        dispute_id,
+        &[
+            VOTE_REFUND,
+            VOTE_REFUND,
+            VOTE_REFUND,
+            VOTE_PAY,
+            VOTE_PAY,
+            VOTE_PAY,
+        ],
+    );
+    // The appeal reveal window must pass first, then a party replaces.
+    let deadline = appeal_reveal_deadline(&mut setup, dispute_id);
+    set_epoch(&mut setup.test, deadline);
+    let verdict = setup.verdict;
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(
+                verdict,
+                "replace_appeal_jury",
+                args![dispute_id, DRAW_DELAY],
+            )
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    let used: bool = setup.test.call_method(
+        setup.verdict,
+        "dispute_appeal_replacement_used",
+        args![dispute_id],
+        vec![],
+    );
+    assert!(used);
+    assert_eq!(
+        appeal_draw_epoch(&mut setup, dispute_id),
+        deadline + DRAW_DELAY
+    );
+    // Draw the replacement panel in the new epoch, rule refund four to
+    // three, settle.
+    let appeal_panel = draw_appeal_panel(&mut setup, dispute_id);
+    assert_eq!(appeal_panel.len(), 7);
+    let mut appeal_votes = [VOTE_PAY; 7];
+    for vote in appeal_votes.iter_mut().take(4) {
+        *vote = VOTE_REFUND;
+    }
+    rule_appeal_panel(&mut setup, &jurors, dispute_id, &appeal_votes);
+    settle(&mut setup, &payer_secret, dispute_id);
+    assert_eq!(dispute_outcome(&mut setup, dispute_id), VOTE_REFUND);
+    assert_eq!(dispute_payee_amount(&mut setup, dispute_id), 0);
+    assert_eq!(balance(&mut setup.test, &setup.payee), payee_before);
+    assert_eq!(
+        balance(&mut setup.test, &setup.payer),
+        payer_before - APPEAL_FEE + 490_000 + 15_000
+    );
+    assert_eq!(vault_balance(&mut setup), 0);
+}
+
+#[test]
+fn open_dispute_pool_too_small_rejected() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    // Two jurors cannot fill a panel of three.
+    let _jurors = register_jurors(&mut setup, 2);
+    let payer_secret = setup.payer.secret.clone();
+    let verdict = setup.verdict;
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "open_dispute", args![setup.escrow, DRAW_DELAY])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "not enough eligible jurors");
+}
+
+#[test]
+fn open_appeal_pool_too_small_rejected() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    // Three jurors fill a first-round panel but not an appeal panel
+    // of seven.
+    let jurors = register_jurors(&mut setup, 3);
+    let payer_secret = setup.payer.secret.clone();
+    let (dispute_id, _panel) =
+        dispute_with_ruling(&mut setup, &jurors, &[VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    let verdict = setup.verdict;
+    let payer = setup.payer.clone();
+    let payer_proof = payer.proof.clone();
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(payer.account, "withdraw", args![TARI_TOKEN, APPEAL_FEE])
+            .put_last_instruction_output_on_workspace("appeal_fee")
+            .call_method(
+                verdict,
+                "open_appeal",
+                args![
+                    dispute_id,
+                    DRAW_DELAY,
+                    Workspace("appeal_fee"),
+                    payer.account
+                ],
+            )
+            .build_and_seal(&payer_secret),
+        vec![payer_proof],
+    );
+    assert_reject_reason(&reason, "not enough eligible jurors");
+}
+
+#[test]
+fn appeal_panel_differs_from_first_round_with_same_hash() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 7);
+    let payer_secret = setup.payer.secret.clone();
+    let (dispute_id, first_panel) =
+        dispute_with_ruling(&mut setup, &jurors, &[VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    // The appeal draws from the same epoch hash as the first round.
+    let payer = setup.payer.clone();
+    open_appeal(&mut setup, &payer, dispute_id, APPEAL_FEE);
+    let draw_epoch = appeal_draw_epoch(&mut setup, dispute_id);
+    set_epoch(&mut setup.test, draw_epoch);
+    set_epoch_hash(&mut setup.test, hash_of(0xE2));
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(setup.verdict, "draw_appeal_jury", args![dispute_id])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    let appeal_panel = appeal_panel_keys(&mut setup, dispute_id);
+    assert_eq!(appeal_panel.len(), 7);
+    // Same hash, same pool, same dispute, round 0 in both: only the
+    // draw domain differs, so the panels must differ.
+    let mut first_sorted = first_panel.clone();
+    let mut appeal_sorted = appeal_panel.clone();
+    first_sorted.sort();
+    appeal_sorted.sort();
+    assert_ne!(
+        first_sorted,
+        appeal_sorted[0..3].to_vec(),
+        "appeal panel must differ from the first-round panel"
+    );
+    assert_ne!(
+        first_sorted, appeal_sorted,
+        "appeal panel must differ from the first-round panel"
+    );
+}
+
+#[test]
+fn reschedule_appeal_draw_moves_beyond_current_epoch() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 7);
+    let payer_secret = setup.payer.secret.clone();
+    let (dispute_id, _first) =
+        dispute_with_ruling(&mut setup, &jurors, &[VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    let payer = setup.payer.clone();
+    open_appeal(&mut setup, &payer, dispute_id, APPEAL_FEE);
+    let draw_epoch = appeal_draw_epoch(&mut setup, dispute_id);
+    // The appeal draw epoch passes without a draw: reschedule past the
+    // current epoch, never onto it.
+    set_epoch(&mut setup.test, draw_epoch + 1);
+    let verdict = setup.verdict;
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "reschedule_appeal_draw", args![dispute_id])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    let new_epoch = appeal_draw_epoch(&mut setup, dispute_id);
+    assert_eq!(new_epoch, draw_epoch + 2);
+    let reschedules: u64 = setup.test.call_method(
+        setup.verdict,
+        "dispute_appeal_reschedules",
+        args![dispute_id],
+        vec![],
+    );
+    assert_eq!(reschedules, 1);
+    // The appeal draw now executes in the rescheduled epoch.
+    let appeal_panel = draw_appeal_panel(&mut setup, dispute_id);
+    assert_eq!(appeal_panel.len(), 7);
 }

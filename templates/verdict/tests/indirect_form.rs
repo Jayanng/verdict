@@ -357,7 +357,7 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
     // Exactly the ruled amount moved to the payee, the juror fees stayed
     // in the court's fee vault, and nothing is left in the escrow vault.
     // Conservation is exact: payee gain + juror fees + payer refund
-    // (zero) == funded total.
+    // (0) == funded total.
     assert_eq!(
         balance(&mut setup.test, &setup.payee),
         payee_before + TOTAL - 2 * JUROR_FEE
@@ -617,6 +617,7 @@ fn future_epoch_draw_commitment_enforced() {
     // Open at epoch 0 with K = 2: the draw locks to epoch 2, and the
     // opening hash (the predictable current one) is recorded.
     set_epoch_hash(&mut setup.test, hash_of(0x01));
+    let _jurors = register_jurors(&mut setup, 3);
     let dispute_id = open_dispute(&mut setup, &payer_secret);
     let draw_epoch: u64 = setup.test.call_method(
         setup.verdict,

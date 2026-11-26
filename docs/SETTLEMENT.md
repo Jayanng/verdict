@@ -24,6 +24,31 @@ the dispute id and the two accounts the money goes to.
 | Appeal fee | 35,000 | Posted by the appellant, funds the appeal jurors |
 | Slash | 5,000 | Bond forfeited by one offending juror |
 | Bond floor | 30,000 | Twice the largest juror fee times the panel size |
+| Minimum draw delay | 1 epoch | Every draw commits to a future epoch at least one epoch ahead |
+| Reveal window | 2 epochs | Time a drawn juror has to reveal, counted from the draw epoch |
+| Draw domain | 0 first round, 1 appeal | Folded into the panel derivation, so the two rounds never draw the same panel from the same hash |
+
+## Draw rules
+
+Every draw commits to a future epoch hash. The delay passed to
+`open_dispute`, `replace_jury`, `open_appeal`, and `replace_appeal_jury`
+must be at least one epoch, enforced in the template, so a draw can never
+use the current epoch hash, which is already known when the dispute
+opens.
+
+The eligible pool must already hold a full panel when a dispute opens:
+at least three jurors for a first round, at least seven for an appeal.
+The check runs at open and again at draw, so the escrow never freezes
+into a dispute that cannot draw, and a draw never returns a short panel.
+
+A missed draw window is rescheduled past the current epoch: the new draw
+epoch is the current epoch plus one, never the current epoch itself, so a
+rescheduled draw still uses a future epoch hash. The reschedule is
+recorded on chain.
+
+The panel derivation folds in a draw domain: 0 for the first round, 1
+for the appeal. The same hash, pool, dispute id, and round nonce can
+never produce the same panel across the two rounds.
 
 A majority is a strict majority of the revealed votes, with at least a
 majority of the panel revealed: two of three for a first round, four of
@@ -116,9 +141,15 @@ did not reveal are recorded as failed. The panel, the commits, and the
 reveals are cleared, the round nonce advances, and the next draw executes
 only in the new locked epoch. One replacement per round.
 
+Only a party to the dispute, the payer or the payee, can call a
+replacement, and only once the reveal window has passed: the draw epoch
+plus two epochs. A replacement can never land while honest jurors are
+still within their time to reveal. The deadline is stored on the dispute
+at draw time and is readable on chain.
+
 A missed draw window is rescheduled the same way: if the locked epoch
-passes without a draw, the commitment moves to the next epoch, and the
-reschedule is recorded on chain.
+passes without a draw, the commitment moves past the current epoch, and
+the reschedule is recorded on chain.
 
 ## No-ruling fallback
 
@@ -127,7 +158,7 @@ ruling can be reached: either the replacement draw has been used and the new
 round still has no majority, or a round is fully revealed with no majority.
 The same rule applies to the appeal round.
 
-The close executes a zero ruling, which unfreezes the escrow, and the whole
+The close executes a ruling with a payee amount of 0, which unfreezes the escrow, and the whole
 principal returns to the payer: the opener's fee is refunded in full, and
 no juror fee is taken. Jurors who were drawn and did not reveal are
 slashed, and the forfeited bonds go to the jurors who did reveal, split by
@@ -160,7 +191,7 @@ court never freezes money indefinitely.
 4. A ruling executes at most once.
 5. An evidence hash, once posted, cannot be changed.
 6. The jury draw is recomputable from published inputs: future epoch hash,
-   pool list, dispute id, and round nonce.
+   pool list, dispute id, round nonce, and draw domain.
 7. No owner, no admin method, no upgrade, on the court or either escrow.
 8. The court can always be exited: ruling, appeal, or bounded no-ruling
    fallback; the court never freezes money indefinitely.

@@ -642,6 +642,7 @@ fn refund_blocked_while_frozen() {
     let mut setup = make_setup("new");
     fund(&mut setup, AMOUNT);
     let payer_secret = setup.payer.secret.clone();
+    let _jurors = register_jurors(&mut setup, 3);
     open_dispute(&mut setup, &payer_secret);
     assert!(is_frozen(&mut setup));
     set_epoch(&mut setup.test, DEADLINE);
@@ -773,6 +774,7 @@ fn refund_empty_vault_fails() {
 fn freeze_blocks_state_changes() {
     let mut setup = make_setup("new");
     fund(&mut setup, AMOUNT);
+    let _jurors = register_jurors(&mut setup, 3);
     let payer_secret = setup.payer.secret.clone();
     let payee_secret = setup.payee.secret.clone();
     open_dispute(&mut setup, &payer_secret);
