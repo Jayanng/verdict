@@ -164,6 +164,22 @@ export function voteCommitmentBytes(vote, saltHex, disputeId, jurorHex) {
 // pool indices, in order. The pool must already hold a full panel, or the
 // draw is refused.
 export function derivePanel(pool, drawHashHex, disputeId, round, domain = DRAW_DOMAIN_FIRST, size = PANEL_SIZE) {
+  // The pool and the size are validated before any drawing: the pool
+  // must be an array of distinct jurors, and the size must be a
+  // non-negative whole number. A fractional size would otherwise draw
+  // a whole number of slots silently, a negative size would return an
+  // empty panel, and a pool with the same juror twice could seat that
+  // juror twice on one panel, since the draw dedups by index, not by
+  // identity. A size of 0 is an undrawn panel and returns no slots.
+  if (!Array.isArray(pool)) {
+    throw new Error("pool must be an array of jurors");
+  }
+  if (new Set(pool).size !== pool.length) {
+    throw new Error("pool must not contain the same juror twice");
+  }
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error("panel size must be a non-negative whole number within the safe integer range");
+  }
   const hashBytes = hexToBytes(drawHashHex);
   if (hashBytes.length !== 32) throw new Error("draw hash must be 32 bytes");
   const poolLen = pool.length;
@@ -383,6 +399,6 @@ export function callerRuleCheck(callerAddress, arbitratorAddress) {
   }
   return {
     allowed: false,
-    reason: "caller is not the court named as arbitrator at creation, so the caller-component rule refuses the call, and the in-method assert refuses it too.",
+    reason: "caller is not the court named as arbitrator at creation, so the caller-component rule refuses the call.",
   };
 }

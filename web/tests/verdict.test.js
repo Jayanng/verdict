@@ -130,6 +130,19 @@ describe("derivePanel", () => {
       /not enough eligible jurors/,
     );
   });
+
+  test("a fractional or negative panel size is refused, not drawn", () => {
+    assert.throws(() => derivePanel(pool, drawHash, 0, 0, DRAW_DOMAIN_FIRST, 1.5), /non-negative whole number/);
+    assert.throws(() => derivePanel(pool, drawHash, 0, 0, DRAW_DOMAIN_FIRST, -1), /non-negative whole number/);
+    assert.throws(() => derivePanel(pool, drawHash, 0, 0, DRAW_DOMAIN_FIRST, Number.NaN), /non-negative whole number/);
+    assert.deepEqual(derivePanel(pool, drawHash, 0, 0, DRAW_DOMAIN_FIRST, 0), []);
+  });
+
+  test("a pool with the same juror twice is refused, not seated twice", () => {
+    const dupPool = ["alice", "alice", "bob", "carol", "dave", "erin", "frank"];
+    assert.throws(() => derivePanel(dupPool, drawHash, 0, 0), /same juror twice/);
+    assert.throws(() => derivePanel("not-an-array", drawHash, 0, 0), /array of jurors/);
+  });
 });
 
 describe("majorityOutcome", () => {
