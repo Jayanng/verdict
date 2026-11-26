@@ -192,7 +192,8 @@ describe("settleAmounts", () => {
     assert.deepEqual(settleAmounts(500000, VOTE_PAY, 2), {
       fees: 10000,
       payeeAmount: 490000,
-      payerAmount: 0,
+      payerAmount: 10000,
+      payerAmountNet: 0,
     });
   });
 
@@ -200,7 +201,8 @@ describe("settleAmounts", () => {
     assert.deepEqual(settleAmounts(300000, VOTE_REFUND, 2), {
       fees: 10000,
       payeeAmount: 0,
-      payerAmount: 290000,
+      payerAmount: 300000,
+      payerAmountNet: 290000,
     });
   });
 
@@ -208,12 +210,14 @@ describe("settleAmounts", () => {
     assert.deepEqual(settleAmounts(100001, VOTE_SPLIT, 2), {
       fees: 10000,
       payeeAmount: 45001,
-      payerAmount: 45000,
+      payerAmount: 55000,
+      payerAmountNet: 45000,
     });
     assert.deepEqual(settleAmounts(500000, VOTE_SPLIT, 2), {
       fees: 10000,
       payeeAmount: 245000,
-      payerAmount: 245000,
+      payerAmount: 255000,
+      payerAmountNet: 245000,
     });
   });
 
@@ -221,7 +225,8 @@ describe("settleAmounts", () => {
     assert.deepEqual(settleAmounts(10000, VOTE_PAY, 2), {
       fees: 10000,
       payeeAmount: 0,
-      payerAmount: 0,
+      payerAmount: 10000,
+      payerAmountNet: 0,
     });
   });
 
@@ -285,7 +290,12 @@ describe("sample data consistency", () => {
       const outcome = majorityOutcome(votes, dispute.panel.length);
       const amounts = settleAmounts(dispute.principal, outcome.vote, outcome.count);
       assert.equal(dispute.payeeAmount, amounts.payeeAmount, `dispute ${dispute.id} payee`);
-      assert.equal(dispute.payerAmount, amounts.payerAmount, `dispute ${dispute.id} payer`);
+      assert.equal(dispute.payerAmount, amounts.payerAmountNet, `dispute ${dispute.id} payer`);
+      assert.equal(
+        dispute.payerAmountGross,
+        amounts.payerAmount,
+        `dispute ${dispute.id} payer gross`,
+      );
       assert.equal(dispute.fees, amounts.fees, `dispute ${dispute.id} fees`);
       assert.equal(
         dispute.payeeAmount + dispute.payerAmount + dispute.fees,
@@ -346,11 +356,12 @@ describe("BigInt settlement amounts", () => {
     assert.deepEqual(settleAmounts(principal, VOTE_PAY, 2), {
       fees: 10000n,
       payeeAmount: principal - 10000n,
-      payerAmount: 0n,
+      payerAmount: 10000n,
+      payerAmountNet: 0n,
     });
     const split = settleAmounts(principal, VOTE_SPLIT, 2);
-    assert.equal(split.payeeAmount + split.payerAmount + split.fees, principal);
-    assert.equal(split.payeeAmount - split.payerAmount, 1n);
+    assert.equal(split.payeeAmount + split.payerAmountNet + split.fees, principal);
+    assert.equal(split.payeeAmount - split.payerAmountNet, 1n);
     assert.throws(() => settleAmounts(9007199254740993, VOTE_PAY, 2), /whole number/);
   });
 

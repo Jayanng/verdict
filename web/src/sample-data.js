@@ -113,6 +113,7 @@ export const SAMPLE = {
       "outcome": "pay",
       "payeeAmount": 490000,
       "payerAmount": 0,
+      "payerAmountGross": 10000,
       "fees": 10000,
       "drawHash": "9e8d1651911f4dcfd4b7b0cb0d5500847067c5a6a3a17a086663d15ac7f2d4dd",
       "panel": [
@@ -221,6 +222,7 @@ export const SAMPLE = {
       "outcome": "refund",
       "payeeAmount": 0,
       "payerAmount": 290000,
+      "payerAmountGross": 300000,
       "fees": 10000,
       "drawHash": "c46508fe57841fa4a0db3231a1b66713e4ab962e6024072725f2414d4c00003b",
       "panel": [
@@ -326,6 +328,7 @@ export const SAMPLE = {
       "outcome": null,
       "payeeAmount": null,
       "payerAmount": null,
+      "payerAmountGross": null,
       "fees": null,
       "drawHash": "eed2206e9cd45dc96d958fb4a045478c456f83c1e6e0ecb96a8e75d7039eecf1",
       "panel": [

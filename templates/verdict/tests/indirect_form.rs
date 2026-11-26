@@ -427,7 +427,11 @@ fn stranger_direct_call_rejected_by_access_rule() {
         setup
             .test
             .transaction()
-            .call_method(escrow, "execute_ruling", args![0u64, PAYEE_SHARE])
+            .call_method(
+                escrow,
+                "execute_ruling",
+                args![0u64, VOTE_PAY, (PAYEE_SHARE, PAYER_SHARE)],
+            )
             .build_and_seal(&stranger_secret),
         vec![],
     );
@@ -496,6 +500,31 @@ fn stranger_direct_call_rejected_by_in_method_assert() {
         .call_method(setup.escrow, "is_frozen", args![], vec![]);
     assert!(!frozen);
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), TOTAL);
+
+    // Direct execute_ruling by a stranger: same assert, same rejection.
+    // The escrow is unfrozen here, but the caller assert runs first, so
+    // the rejection is the badge failure, not the frozen guard.
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(
+                escrow,
+                "execute_ruling",
+                args![0u64, VOTE_PAY, (PAYEE_SHARE, PAYER_SHARE)],
+            )
+            .build_and_seal(&stranger_secret),
+        vec![],
+    );
+    eprintln!("assert-layer ruling reject reason: {reason}");
+    assert_reject_reason(&reason, "does not carry the badge");
+    assert!(
+        !reason
+            .to_string()
+            .contains("Access Denied: call component method"),
+        "rule-open twin must not fail on an access rule, got: {reason}"
+    );
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), TOTAL);
 }
 
 // ----- (c) owned-twin positive control -----
@@ -504,11 +533,13 @@ fn stranger_direct_call_rejected_by_in_method_assert() {
 fn owned_twin_owner_bypasses_caller_rule() {
     // Owned twin: the payer created it, so the payer is its owner. The
     // owner bypasses the caller-component rule, and the twin's assert is
-    // off, so the direct calls must SUCCEED.
+    // off, so the direct calls must reach the method body. A direct
+    // execute_ruling that succeeds would return two buckets the test
+    // transaction cannot consume, so the bypass for execute_ruling is
+    // proven by a call that reaches the body and is refused there, for
+    // the mismatched dispute id, instead of by the access rule.
     let mut setup = make_setup("new_owned");
     let payer_secret = setup.payer.secret.clone();
-    let payee_before = balance(&mut setup.test, &setup.payee);
-    let payer_before = balance(&mut setup.test, &setup.payer);
     fund(&mut setup, TOTAL);
 
     let escrow = setup.escrow;
@@ -525,31 +556,33 @@ fn owned_twin_owner_bypasses_caller_rule() {
         .call_method(setup.escrow, "is_frozen", args![], vec![]);
     assert!(frozen, "owner bypass must let the owner freeze directly");
 
-    // Owner executes the ruling directly, routing the returned payee
-    // bucket into the payee's account in the same transaction.
-    let payee_account = setup.payee.account;
-    setup.test.execute_expect_success(
+    // Owner calls execute_ruling directly with the wrong dispute id:
+    // the rule lets the owner through, and the method body refuses the
+    // mismatched id. A rule rejection would read "Access Denied".
+    let reason = setup.test.execute_expect_failure(
         setup
             .test
             .transaction()
-            .call_method(escrow, "execute_ruling", args![0u64, PAYEE_SHARE])
-            .put_last_instruction_output_on_workspace("ruling")
-            .call_method(payee_account, "deposit", args![Workspace("ruling")])
+            .call_method(
+                escrow,
+                "execute_ruling",
+                args![1u64, VOTE_PAY, (PAYEE_SHARE, PAYER_SHARE)],
+            )
             .build_and_seal(&payer_secret),
         vec![],
     );
-    assert_eq!(
-        balance(&mut setup.test, &setup.payee),
-        payee_before + PAYEE_SHARE
+    assert_reject_reason(&reason, "does not match");
+    assert!(
+        !reason
+            .to_string()
+            .contains("Access Denied: call component method"),
+        "owner bypass must pass the access rule, got: {reason}"
     );
-    assert_eq!(balance(&mut setup.test, &setup.payer), payer_before - TOTAL);
-    // Direct execute_ruling moves only the payee share; the remainder
-    // stays in the vault until withdraw_remainder routes it to the payer.
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), PAYER_SHARE);
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), TOTAL);
     let executed: bool = setup
         .test
         .call_method(setup.escrow, "ruling_executed", args![], vec![]);
-    assert!(executed);
+    assert!(!executed);
 }
 
 #[test]

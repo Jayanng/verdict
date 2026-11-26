@@ -91,30 +91,44 @@ refusing juror is neither paid nor slashed.
 ## The matrix
 
 P is the principal. F is the fees owed from the principal: one juror fee per
-juror in the first-round majority, capped at P. The payee amount is what
-`execute_ruling` withdraws; the remainder is what `withdraw_remainder`
-returns. The court takes F out of the remainder bucket into its fee vault
-before paying the payer, so jurors are paid first.
+juror in the first-round majority, capped at P. `execute_ruling` takes the
+outcome and the amounts pair (payee amount, payer amount) and returns both
+buckets in one call, (payee bucket, payer bucket). The payer amount in the
+pair is gross: the amount the escrow routes to the payer side before the
+court takes F out of it. The payer net amount is what the payer keeps
+after the court takes F out of the gross payer bucket into its fee vault,
+so jurors are paid first. In every cell the payee amount plus the gross
+payer amount equals P exactly, and the payee amount plus the net payer
+amount plus F equals P exactly.
 
-| Outcome | Payee amount | Payer amount | Juror fees | Conservation |
-|---|---|---|---|---|
-| Pay | P - F | 0 | F | (P - F) + 0 + F = P |
-| Refund | 0 | P - F | F | 0 + (P - F) + F = P |
-| Split | half of (P - F), rounded up | half of (P - F), rounded down | F | ceil + floor + F = P |
+| Outcome | Payee amount | Payer gross | Payer net | Juror fees | Conservation |
+|---|---|---|---|---|---|
+| Pay | P - F | F | 0 | F | (P - F) + 0 + F = P |
+| Refund | 0 | P | P - F | F | 0 + (P - F) + F = P |
+| Split | half of (P - F), rounded up | half of (P - F), rounded down, plus F | half of (P - F), rounded down | F | ceil + floor + F = P |
+| No ruling | 0 | P | P | 0 | 0 + P + 0 = P |
 
 Pay means the payer's side funds the costs: the payee's award is reduced by
 the fees. Refund means the principal returns to the payer less the fees.
 Split means the post-fee principal is halved, costs pro-rata, with the odd
-micro-Tari going to the payee. Every path asserts the conservation equation
-in the template: payee plus payer plus fees equals the principal exactly.
+micro-Tari going to the payee. No ruling returns the whole principal to
+the payer and takes no fees. Every path asserts the conservation equation
+in the template: payee plus payer net plus fees equals the principal
+exactly. There is no second settlement call: `withdraw_remainder` no
+longer exists, one call to `execute_ruling` returns both buckets and
+empties the vault.
 
 Worked example, principal 500,000, two majority jurors, one minority juror:
-fees F are 10,000. Pay pays the payee 490,000 and the payer nothing. Refund
-pays the payer 490,000 and the payee nothing. Split pays 245,000 each.
+fees F are 10,000. Pay pays the payee 490,000 and the payer nothing, with
+a gross payer amount of 10,000 that goes entirely to fees. Refund pays
+the payer 490,000 net and the payee nothing, with a gross payer amount of
+500,000. Split pays 245,000 each net, with a gross payer amount of
+255,000.
 
 Worked example with dust, principal 100,001, two majority jurors: fees F
 are 10,000, the post-fee principal is 90,001. Split pays the payee 45,001
-and the payer 45,000. The odd micro-Tari goes to the payee.
+and the payer 45,000 net, with a gross payer amount of 55,000. The odd
+micro-Tari goes to the payee.
 
 When the principal is smaller than the fees owed, the fees are capped at
 the principal: the payee and the payer both keep nothing, and the majority
@@ -215,9 +229,9 @@ applies to an appeal draw that never executes. The close needs no panel,
 no votes, and no juror fee: the whole principal returns to the payer and
 any appeal fee returns in full.
 
-The close executes a ruling with a payee amount of 0, which unfreezes the escrow, and the whole
-principal returns to the payer: the opener's fee is refunded in full, and
-no juror fee is taken. The payer account is derived from the escrow, never
+The close executes a ruling with amounts (0, principal), which unfreezes
+the escrow, and the whole principal returns to the payer: the opener's fee
+is refunded in full, and no juror fee is taken. The payer account is derived from the escrow, never
 taken from the caller. Jurors who were drawn and did not reveal are
 slashed, and the forfeited bonds go to the jurors who did reveal, other
 than jurors who voted to refuse: a refusing juror is neither paid nor
@@ -225,8 +239,7 @@ slashed. When nobody who revealed is payable, nobody is slashed: there is
 no one to pay, and the court keeps nothing. Failed jurors are kept per
 round, so an appeal close slashes appeal failures only. An unspent appeal fee returns to the
 appellant in full. A closed dispute can never settle, and the escrow is
-terminal: completed, cancelled, refunded, or ruled with the remainder
-withdrawn.
+terminal: completed, cancelled, refunded, or ruled.
 
 ## The ladder, in order
 

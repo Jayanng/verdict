@@ -206,12 +206,12 @@ function renderDispute(id) {
       <p class="lede" style="margin-top: 8px;">${esc(d.ruling)}</p>
       <div class="fact-grid mt-24">
         <div class="fact"><div class="k">Payee amount</div><div class="v">${fmt(d.payeeAmount)} &micro;T</div></div>
-        <div class="fact"><div class="k">Remainder to payer</div><div class="v">${fmt(d.payerAmount)} &micro;T</div></div>
+        <div class="fact"><div class="k">Payer amount, net of fees</div><div class="v">${fmt(d.payerAmount)} &micro;T</div></div>
         <div class="fact"><div class="k">Juror fees, paid first</div><div class="v">${fmt(d.fees)} &micro;T</div></div>
         <div class="fact"><div class="k">Majority</div><div class="v">${majority ? `${majority.count} of ${d.reveals.length} jurors` : "none"}</div></div>
         <div class="fact"><div class="k">Settlement record</div><div class="v mono">${esc(d.settlementTx)}</div></div>
       </div>
-      <p class="sec-note" style="margin-top: 16px;">Routing as the templates settle it: the court calls execute_ruling with the payee amount, the payee bucket goes to the payee account the court derives from the escrow, the juror fees come first from the remainder bucket into the fee vault, and what is left of the remainder goes straight to the payer account the court derives from the escrow. The settlement record above is a sample label, not a transaction on chain. Payee, payer, and fees always sum to the principal exactly.</p>
+      <p class="sec-note" style="margin-top: 16px;">Routing as the templates settle it: the court calls execute_ruling with the outcome and the amounts pair (payee amount, gross payer amount) in one call, the escrow returns both buckets, the payee bucket goes to the payee account the court derives from the escrow, the juror fees come first from the gross payer bucket into the fee vault, and what is left of the payer bucket goes straight to the payer account the court derives from the escrow. The settlement record above is a sample label, not a transaction on chain. Payee, payer net, and fees always sum to the principal exactly.</p>
     </div>` : `
     <div class="rui-card mt-24">
       <h3>Ruling: not yet made</h3>

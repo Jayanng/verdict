@@ -307,13 +307,15 @@ describe("settlement matrix", () => {
       outcome: VOTE_PAY,
       payeeAmount: 490000n,
       payerAmount: 0n,
+      payerAmountGross: 10000n,
       fees: 10000n,
       leftoverAppealFee: 0n,
     });
     assert.deepEqual(settleAmounts(TOTAL, VOTE_PAY, 2), {
       fees: 10000,
       payeeAmount: 490000,
-      payerAmount: 0,
+      payerAmount: 10000,
+      payerAmountNet: 0,
     });
     assert.equal(court.balance("payee"), payeeBefore + 490000n);
     assert.equal(court.balance("payer"), payerBefore);
@@ -346,7 +348,8 @@ describe("settlement matrix", () => {
     assert.deepEqual(settleAmounts(TOTAL, VOTE_SPLIT, 2), {
       fees: 10000,
       payeeAmount: 245000,
-      payerAmount: 245000,
+      payerAmount: 255000,
+      payerAmountNet: 245000,
     });
     assert.equal(result.payeeAmount, 245000n);
     assert.equal(result.payerAmount, 245000n);
@@ -362,7 +365,8 @@ describe("settlement matrix", () => {
     assert.deepEqual(settleAmounts(100001, VOTE_SPLIT, 2), {
       fees: 10000,
       payeeAmount: 45001,
-      payerAmount: 45000,
+      payerAmount: 55000,
+      payerAmountNet: 45000,
     });
     assert.equal(result.payeeAmount, 45001n);
     assert.equal(result.payerAmount, 45000n);
@@ -379,6 +383,7 @@ describe("settlement matrix", () => {
       outcome: VOTE_PAY,
       payeeAmount: 0n,
       payerAmount: 0n,
+      payerAmountGross: 10000n,
       fees: 10000n,
       leftoverAppealFee: 0n,
     });
@@ -841,14 +846,80 @@ describe("commit and reveal", () => {
 });
 
 describe("escrow rules", () => {
-  test("a ruling executes at most once and the remainder only after a ruling", () => {
+  test("a ruling executes at most once and returns both buckets in one call", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
     escrow.freezeForDispute(0);
-    assert.throws(() => escrow.withdrawRemainder(), /no ruling has executed/);
-    assert.equal(escrow.executeRuling(0, 490000n), 490000n);
-    assert.throws(() => escrow.executeRuling(0, 490000n), /ruling already executed/);
-    assert.equal(escrow.withdrawRemainder(), 10000n);
+    assert.deepEqual(escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n]), [490000n, 10000n]);
+    assert.throws(
+      () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n]),
+      /ruling already executed/,
+    );
     assert.equal(escrow.vault, 0n);
+  });
+
+  test("a ruling whose amounts do not sum to the vault is refused", () => {
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    escrow.freezeForDispute(0);
+    assert.throws(
+      () => escrow.executeRuling(0, VOTE_PAY, [490000n, 9999n]),
+      /must equal the vault balance/,
+    );
+    assert.equal(escrow.vault, BigInt(TOTAL));
+    assert.equal(escrow.rulingExecuted, false);
+  });
+
+  test("a refund that pays the payee is refused", () => {
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    escrow.freezeForDispute(0);
+    assert.throws(
+      () => escrow.executeRuling(0, VOTE_REFUND, [1n, 499999n]),
+      /refund pays the payee nothing/,
+    );
+    assert.equal(escrow.vault, BigInt(TOTAL));
+    assert.equal(escrow.rulingExecuted, false);
+  });
+
+  test("an invalid outcome is refused", () => {
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    escrow.freezeForDispute(0);
+    assert.throws(
+      () => escrow.executeRuling(0, 3, [490000n, 10000n]),
+      /invalid ruling outcome/,
+    );
+    assert.equal(escrow.vault, BigInt(TOTAL));
+  });
+
+  test("the escrow routes both amounts in each matrix cell", () => {
+    const cells = [
+      { outcome: VOTE_PAY, amounts: [490000n, 10000n] },
+      { outcome: VOTE_REFUND, amounts: [0n, 500000n] },
+      { outcome: VOTE_SPLIT, amounts: [245000n, 255000n] },
+      { outcome: NO_OUTCOME, amounts: [0n, 500000n] },
+    ];
+    for (const [i, cell] of cells.entries()) {
+      const escrow = new SimEscrow(`escrow-cell-${i}`, "payer", "payee", TOTAL);
+      escrow.freezeForDispute(0);
+      assert.deepEqual(escrow.executeRuling(0, cell.outcome, cell.amounts), cell.amounts);
+      assert.equal(escrow.vault, 0n);
+      assert.equal(cell.amounts[0] + cell.amounts[1], BigInt(TOTAL));
+    }
+  });
+
+  test("a settled dispute pays the payee and the payer and nobody else", () => {
+    const court = makeCourt(3);
+    const { disputeId } = disputeWithRuling(court, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    const before = new Map([...court.balances.entries()]);
+    const result = settleAtDeadline(court, disputeId);
+    assert.equal(result.payeeAmount, 490000n);
+    assert.equal(result.payerAmount, 0n);
+    assert.equal(result.payerAmountGross, 10000n);
+    assert.equal(court.balance("payee"), before.get("payee") + 490000n);
+    assert.equal(court.balance("payer"), before.get("payer"));
+    assert.equal(court.escrows.get("escrow-0").vault, 0n);
+    for (const [account, balance] of court.balances.entries()) {
+      if (account === "payee" || account === "payer") continue;
+      assert.equal(balance, before.get(account), `${account} must not gain from the ruling`);
+    }
   });
 
   test("an unfunded escrow cannot freeze for a dispute", () => {
@@ -1112,19 +1183,17 @@ describe("reschedule cap", () => {
 });
 
 describe("round 3: caller, delays, epochs, atomic settlement, close rules", () => {
-  test("a stranger cannot execute a ruling or withdraw a remainder", () => {
+  test("a stranger cannot execute a ruling", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
     escrow.freezeForDispute(0);
     assert.throws(
-      () => escrow.executeRuling(0, 490000n, "stranger"),
+      () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n], "stranger"),
       /only the court can execute a ruling/,
     );
-    assert.equal(escrow.executeRuling(0, 490000n, COURT_ID), 490000n);
-    assert.throws(
-      () => escrow.withdrawRemainder("stranger"),
-      /only the court can withdraw the remainder/,
+    assert.deepEqual(
+      escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n], COURT_ID),
+      [490000n, 10000n],
     );
-    assert.equal(escrow.withdrawRemainder(COURT_ID), 10000n);
     assert.equal(escrow.vault, 0n);
   });
 
@@ -1186,7 +1255,7 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
     const payerBefore = court.balance("payer");
     const payeeBefore = court.balance("payee");
     const bondsBefore = panel.map((key) => court.bonds.get(key));
-    assert.throws(() => settleAtDeadline(court, disputeId), /payee amount exceeds the principal/);
+    assert.throws(() => settleAtDeadline(court, disputeId), /must equal the vault balance/);
     assert.equal(escrow.vault, 1n);
     assert.equal(escrow.rulingExecuted, false);
     assert.equal(court.dispute(disputeId).settled, false);

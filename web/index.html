@@ -152,7 +152,7 @@
         <div class="step-card"><div class="num">3</div><h3>Draw the jury</h3><p>In the locked epoch only, three bonded strangers are drawn from the frozen pool by the future epoch hash.</p></div>
         <div class="step-card"><div class="num">4</div><h3>Commit, then reveal</h3><p>Each juror commits a hash of their vote and salt, then reveals. A juror who never reveals is replaced.</p></div>
         <div class="step-card"><div class="num">5</div><h3>The majority rules</h3><p>Pay, refund, or split. A tie goes to appeal with seven jurors, funded by the appellant.</p></div>
-        <div class="step-card"><div class="num">6</div><h3>The escrow executes</h3><p>The court calls execute_ruling, the escrow moves its own vault, and the remainder goes to the payer. If quorum fails, the bounded no-ruling fallback closes the dispute and unfreezes the escrow.</p></div>
+        <div class="step-card"><div class="num">6</div><h3>The escrow executes</h3><p>The court calls execute_ruling once with the outcome and the amounts pair, the escrow moves its own vault and returns both buckets, and the fees come out of the payer bucket before the payer is paid. If quorum fails, the bounded no-ruling fallback closes the dispute and unfreezes the escrow.</p></div>
       </div>
     </div>
   </section>

@@ -221,14 +221,21 @@ export function majorityOutcome(reveals, panelSize = PANEL_SIZE) {
 
 // The principal routing for a ruled outcome, exactly as the template
 // settles it. The juror fees come first from the principal, capped at the
-// principal, and only the remainder is routed: pay sends it to the payee,
+// principal, and only the post-fee principal is routed: pay sends it to the payee,
 // refund returns it to the payer, split divides it by largest remainder,
 // with the odd micro-Tari to the payee. Returns { fees, payeeAmount,
-// payerAmount }. Slashed bonds top up majority juror claims on top of the
-// fee, and are paid through claim_fee, not through this routing. Amounts
-// are BigInt end to end when the principal is a BigInt, so amounts above
-// the safe integer range keep every micro-Tari; a Number principal keeps
-// the Number behaviour the page already uses.
+// payerAmount, payerAmountNet }. payerAmount is the GROSS payer amount
+// the escrow routes in its payer bucket: the whole principal less the
+// payee amount. payerAmountNet is what the payer keeps after the court
+// takes the juror fees out of that gross payer bucket, so
+// payerAmountNet is payerAmount less fees, and payeeAmount plus
+// payerAmountNet plus fees equals the principal exactly. The dispute
+// record and the sample data store the net payer amount, matching the
+// template's dispute_payer_amount. Slashed bonds top up majority juror
+// claims on top of the fee, and are paid through claim_fee, not through
+// this routing. Amounts are BigInt end to end when the principal is a
+// BigInt, so amounts above the safe integer range keep every micro-Tari;
+// a Number principal keeps the Number behaviour the page already uses.
 function amountToBigInt(value) {
   if (typeof value === "bigint") return value;
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
@@ -243,20 +250,23 @@ export function settleAmounts(principal, outcome, majorityCount) {
   const count = amountToBigInt(majorityCount);
   const fees = p < BigInt(JUROR_FEE) * count ? p : BigInt(JUROR_FEE) * count;
   const postFee = p - fees;
-  const done = (payeeAmount, payerAmount) => ({
+  const done = (payeeAmount, payerAmountGross) => ({
     fees: asBigInt ? fees : Number(fees),
     payeeAmount: asBigInt ? payeeAmount : Number(payeeAmount),
-    payerAmount: asBigInt ? payerAmount : Number(payerAmount),
+    payerAmount: asBigInt ? payerAmountGross : Number(payerAmountGross),
+    payerAmountNet: asBigInt
+      ? payerAmountGross - fees
+      : Number(payerAmountGross - fees),
   });
   if (outcome === VOTE_PAY) {
-    return done(postFee, 0n);
+    return done(postFee, fees);
   }
   if (outcome === VOTE_REFUND) {
-    return done(0n, postFee);
+    return done(0n, p);
   }
   if (outcome === VOTE_SPLIT) {
-    const [payeeAmount, payerAmount] = splitLargestRemainder(postFee, [1n, 1n]);
-    return done(payeeAmount, payerAmount);
+    const [payeeAmount, payerAmountNet] = splitLargestRemainder(postFee, [1n, 1n]);
+    return done(payeeAmount, payerAmountNet + fees);
   }
   throw new Error("settleAmounts needs a ruled outcome: pay, refund, or split");
 }
@@ -302,11 +312,13 @@ export function splitLargestRemainder(total, weights) {
   return out;
 }
 
-// The escrow caller rule, as published: execute_ruling and
-// freeze_for_dispute accept calls from exactly one component, the court named
-// as arbitrator at creation, and the escrow is ownerless, so no owner path
-// can bypass it. This is a browser-side check of that published rule against
-// the published inputs, not a chain call.
+// The escrow caller rule, as published: execute_ruling(dispute_id,
+// outcome, amounts) and freeze_for_dispute accept calls from exactly one
+// component, the court named as arbitrator at creation, and the escrow is
+// ownerless, so no owner path can bypass it. One call to execute_ruling
+// returns both buckets, (payee bucket, payer bucket), and there is no
+// second settlement call. This is a browser-side check of that published
+// rule against the published inputs, not a chain call.
 export function callerRuleCheck(callerAddress, arbitratorAddress) {
   if (callerAddress === arbitratorAddress) {
     return {

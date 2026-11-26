@@ -156,6 +156,10 @@ mod verdict {
         pub outcome: u64,
         /// Amount the ruling paid to the payee, in micro-Tari.
         pub payee_amount: u64,
+        /// Amount the ruling paid to the payer, net of juror fees, in
+        /// micro-Tari. The escrow routes the gross payer amount; the
+        /// court takes the juror fees out of it before paying the payer.
+        pub payer_amount: u64,
         /// Juror fees taken from the principal at settle, in micro-Tari.
         pub fees_paid: u64,
         /// Draw round nonce, 0 for the first draw.
@@ -306,6 +310,7 @@ mod verdict {
                 closed_no_ruling: false,
                 outcome: NO_OUTCOME,
                 payee_amount: 0,
+                payer_amount: 0,
                 fees_paid: 0,
                 round: 0,
                 replacement_used: false,
@@ -600,7 +605,7 @@ mod verdict {
         /// the payee keys from the escrow and derives their accounts
         /// from those keys, so no caller can redirect the proceeds to
         /// an account of their own. Jurors are paid first: the
-        /// fees owed to the majority jurors are taken from the remainder
+        /// fees owed to the majority jurors are taken from the payer
         /// bucket into the fee vault before the payer is paid. Costs are
         /// capped at the principal. Exactly once. Settle runs only once
         /// the reveal window has passed, for the first round and, when
@@ -717,37 +722,42 @@ mod verdict {
                 payee_amount <= principal,
                 "payee amount exceeds the principal"
             );
+            // The payer amount the escrow routes is gross: the whole
+            // principal less the payee amount. The court takes the juror
+            // fees out of that gross payer bucket before paying the
+            // payer, so the payer keeps the net amount.
+            let payer_amount_gross = principal
+                .checked_sub(payee_amount)
+                .expect("payer amount underflow");
             // Order the ruling: the escrow moves its own vault exactly
-            // once, then returns the remainder.
-            let payee_bucket: Bucket = ComponentManager::get(escrow)
-                .call("execute_ruling", args![dispute_id, payee_amount]);
-            let mut remainder_bucket: Bucket =
-                ComponentManager::get(escrow).call("withdraw_remainder", args![]);
+            // once and returns both buckets in one call.
+            let (payee_bucket, mut payer_bucket): (Bucket, Bucket) = ComponentManager::get(escrow)
+                .call(
+                    "execute_ruling",
+                    args![dispute_id, outcome, (payee_amount, payer_amount_gross)],
+                );
             let payee_moved = payee_bucket
                 .amount()
                 .to_u64_checked()
                 .expect("payee bucket amount out of range");
-            let remainder_moved = remainder_bucket
+            let payer_moved = payer_bucket
                 .amount()
                 .to_u64_checked()
-                .expect("remainder bucket amount out of range");
+                .expect("payer bucket amount out of range");
             assert_eq!(
                 payee_moved, payee_amount,
                 "escrow paid a different amount than ruled"
             );
             assert_eq!(
-                remainder_moved,
-                principal
-                    .checked_sub(payee_amount)
-                    .expect("remainder underflow"),
-                "escrow remainder does not match the principal"
+                payer_moved, payer_amount_gross,
+                "escrow paid a different payer amount than ruled"
             );
-            // Jurors first: take the fees out of the remainder bucket
-            // into the fee vault, then pay the parties. Conservation is
+            // Jurors first: take the fees out of the payer bucket into
+            // the fee vault, then pay the parties. Conservation is
             // exact: payee plus payer plus fees equals the principal.
-            let fee_bucket = remainder_bucket.take(Amount::from_u64(fees));
+            let fee_bucket = payer_bucket.take(Amount::from_u64(fees));
             self.fee_vault.deposit(fee_bucket);
-            let payer_amount = remainder_moved
+            let payer_amount = payer_amount_gross
                 .checked_sub(fees)
                 .expect("payer amount underflow");
             assert_eq!(
@@ -763,7 +773,7 @@ mod verdict {
                 ComponentManager::get(payee_account).invoke("deposit", args![payee_bucket]);
             }
             if payer_amount > 0 {
-                ComponentManager::get(payer_account).invoke("deposit", args![remainder_bucket]);
+                ComponentManager::get(payer_account).invoke("deposit", args![payer_bucket]);
             }
             // Slashing, per round. Offenders forfeit one juror fee of
             // bond each; the forfeited bonds top up the majority jurors
@@ -821,6 +831,7 @@ mod verdict {
             let dispute = self.dispute_mut(dispute_id);
             dispute.outcome = outcome;
             dispute.payee_amount = payee_amount;
+            dispute.payer_amount = payer_amount;
             dispute.fees_paid = fees;
             dispute.settled = true;
         }
@@ -1123,7 +1134,7 @@ mod verdict {
         /// the first round is final once its reveal window has passed,
         /// since no more first-round reveals can land after the
         /// deadline, and the appeal round must be finished the same
-        /// way. The ruling executes with a payee amount of 0, which
+        /// way. The ruling executes with amounts (0, principal), which
         /// unfreezes the escrow, and the whole principal returns to
         /// the payer: the opener's fee is refunded in full, no juror
         /// fee is taken. The payer account is read from the escrow,
@@ -1198,33 +1209,34 @@ mod verdict {
                 dispute.escrow
             };
             let principal: u64 = ComponentManager::get(escrow).call("vault_balance", args![]);
-            // A ruling with a payee amount of 0 unfreezes the escrow;
-            // the remainder is the whole principal, and it all returns
-            // to the payer.
-            let payee_bucket: Bucket =
-                ComponentManager::get(escrow).call("execute_ruling", args![dispute_id, 0u64]);
-            let remainder_bucket: Bucket =
-                ComponentManager::get(escrow).call("withdraw_remainder", args![]);
+            // A ruling with amounts (0, principal) unfreezes the
+            // escrow; the payer bucket is the whole principal, and it
+            // all returns to the payer.
+            let (payee_bucket, payer_bucket): (Bucket, Bucket) = ComponentManager::get(escrow)
+                .call(
+                    "execute_ruling",
+                    args![dispute_id, NO_OUTCOME, (0u64, principal)],
+                );
             let payee_moved = payee_bucket
                 .amount()
                 .to_u64_checked()
                 .expect("payee bucket amount out of range");
-            let remainder_moved = remainder_bucket
+            let payer_moved = payer_bucket
                 .amount()
                 .to_u64_checked()
-                .expect("remainder bucket amount out of range");
+                .expect("payer bucket amount out of range");
             assert_eq!(payee_moved, 0, "no-ruling payee amount must be 0");
             assert_eq!(
-                remainder_moved, principal,
-                "no-ruling remainder must be the whole principal"
+                payer_moved, principal,
+                "no-ruling payer amount must be the whole principal"
             );
             // The whole principal returns to the payer named by the
             // escrow, never to an account the caller supplies.
             let payer_key: RistrettoPublicKeyBytes =
                 ComponentManager::get(escrow).call("payer", args![]);
             let payer_account = Self::account_address(payer_key);
-            if remainder_moved > 0 {
-                ComponentManager::get(payer_account).invoke("deposit", args![remainder_bucket]);
+            if payer_moved > 0 {
+                ComponentManager::get(payer_account).invoke("deposit", args![payer_bucket]);
             }
             // Slash the jurors who did not reveal, and pay the forfeited
             // bonds to the jurors who did reveal, other than jurors who
@@ -1308,6 +1320,7 @@ mod verdict {
             dispute.closed_no_ruling = true;
             dispute.outcome = NO_OUTCOME;
             dispute.payee_amount = 0;
+            dispute.payer_amount = principal;
             dispute.fees_paid = 0;
         }
 
@@ -1383,6 +1396,12 @@ mod verdict {
         /// Amount the ruling paid to the payee, in micro-Tari.
         pub fn dispute_payee_amount(&self, dispute_id: u64) -> u64 {
             self.dispute(dispute_id).payee_amount
+        }
+
+        /// Amount the ruling paid to the payer, net of juror fees, in
+        /// micro-Tari.
+        pub fn dispute_payer_amount(&self, dispute_id: u64) -> u64 {
+            self.dispute(dispute_id).payer_amount
         }
 
         /// Juror fees taken from the principal at settle, in micro-Tari.

@@ -425,6 +425,15 @@ fn dispute_payee_amount(setup: &mut Setup, dispute_id: u64) -> u64 {
     )
 }
 
+fn dispute_payer_amount(setup: &mut Setup, dispute_id: u64) -> u64 {
+    setup.test.call_method(
+        setup.verdict,
+        "dispute_payer_amount",
+        args![dispute_id],
+        vec![],
+    )
+}
+
 fn dispute_fees_paid(setup: &mut Setup, dispute_id: u64) -> u64 {
     setup.test.call_method(
         setup.verdict,
@@ -487,6 +496,7 @@ fn settle_pay_majority_pays_fees_first() {
     // principal. The payee keeps 490,000, the payer keeps nothing.
     assert_eq!(dispute_outcome(&mut setup, dispute_id), VOTE_PAY);
     assert_eq!(dispute_payee_amount(&mut setup, dispute_id), 490_000);
+    assert_eq!(dispute_payer_amount(&mut setup, dispute_id), 0);
     assert_eq!(dispute_fees_paid(&mut setup, dispute_id), 10_000);
     assert_eq!(
         balance(&mut setup.test, &setup.payee),
@@ -527,6 +537,7 @@ fn settle_refund_majority_returns_principal_less_fees() {
 
     assert_eq!(dispute_outcome(&mut setup, dispute_id), VOTE_REFUND);
     assert_eq!(dispute_payee_amount(&mut setup, dispute_id), 0);
+    assert_eq!(dispute_payer_amount(&mut setup, dispute_id), 490_000);
     assert_eq!(dispute_fees_paid(&mut setup, dispute_id), 10_000);
     assert_eq!(balance(&mut setup.test, &setup.payee), payee_before);
     assert_eq!(
@@ -557,6 +568,7 @@ fn settle_split_divides_post_fee_principal() {
     // Post-fee principal is 490,000; split halves it exactly.
     assert_eq!(dispute_outcome(&mut setup, dispute_id), VOTE_SPLIT);
     assert_eq!(dispute_payee_amount(&mut setup, dispute_id), 245_000);
+    assert_eq!(dispute_payer_amount(&mut setup, dispute_id), 245_000);
     assert_eq!(dispute_fees_paid(&mut setup, dispute_id), 10_000);
     assert_eq!(
         balance(&mut setup.test, &setup.payee),
@@ -586,6 +598,7 @@ fn settle_split_odd_micro_tari_goes_to_payee() {
     // payee, the payer keeps the floor half.
     assert_eq!(dispute_outcome(&mut setup, dispute_id), VOTE_SPLIT);
     assert_eq!(dispute_payee_amount(&mut setup, dispute_id), 45_001);
+    assert_eq!(dispute_payer_amount(&mut setup, dispute_id), 45_000);
     assert_eq!(dispute_fees_paid(&mut setup, dispute_id), 10_000);
     assert_eq!(
         balance(&mut setup.test, &setup.payee),
@@ -617,6 +630,7 @@ fn settle_fees_capped_at_small_principal() {
     // whole principal, so the payee and the payer both keep nothing.
     assert_eq!(dispute_outcome(&mut setup, dispute_id), VOTE_PAY);
     assert_eq!(dispute_payee_amount(&mut setup, dispute_id), 0);
+    assert_eq!(dispute_payer_amount(&mut setup, dispute_id), 0);
     assert_eq!(dispute_fees_paid(&mut setup, dispute_id), 10_000);
     assert_eq!(balance(&mut setup.test, &setup.payee), payee_before);
     assert_eq!(balance(&mut setup.test, &setup.payer), payer_before);
@@ -950,6 +964,8 @@ fn no_ruling_fallback_returns_principal() {
     );
     assert!(closed);
     assert_eq!(dispute_outcome(&mut setup, dispute_id), NO_OUTCOME);
+    assert_eq!(dispute_payee_amount(&mut setup, dispute_id), 0);
+    assert_eq!(dispute_payer_amount(&mut setup, dispute_id), TOTAL);
     assert_eq!(balance(&mut setup.test, &setup.payee), payee_before);
     assert_eq!(balance(&mut setup.test, &setup.payer), payer_before + TOTAL);
     assert_eq!(vault_balance(&mut setup), 0);

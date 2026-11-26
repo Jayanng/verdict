@@ -79,9 +79,12 @@ function defaultEpochHash(epoch) {
 
 // One simulated escrow: a vault funded by the payer, frozen by a dispute,
 // executed at most once by the court. Only the court identity may execute
-// a ruling or withdraw the remainder: any other caller is refused, the
-// same way the real escrow refuses every caller but the court named as
-// arbitrator at creation.
+// a ruling: any other caller is refused, the same way the real escrow
+// refuses every caller but the court named as arbitrator at creation.
+// executeRuling takes the outcome and the amounts pair (payee amount,
+// payer amount), where the payer amount is gross, before the court takes
+// juror fees out of it, and returns both amounts in one call, so the
+// vault is empty after a ruling and no second call is needed.
 export class SimEscrow {
   constructor(id, payer, payee, principal, courtId = COURT_ID) {
     this.id = id;
@@ -92,7 +95,6 @@ export class SimEscrow {
     this.frozen = false;
     this.disputeId = null;
     this.rulingExecuted = false;
-    this.remainderWithdrawn = false;
     this.courtId = courtId;
   }
 
@@ -103,24 +105,27 @@ export class SimEscrow {
     this.disputeId = disputeId;
   }
 
-  executeRuling(disputeId, payeeAmount, caller = this.courtId) {
+  executeRuling(disputeId, outcome, amounts, caller = this.courtId) {
     if (caller !== this.courtId) fail("only the court can execute a ruling");
-    if (!this.frozen || this.disputeId !== disputeId) fail("escrow not frozen for this dispute");
     if (this.rulingExecuted) fail("ruling already executed");
-    if (payeeAmount > this.vault) fail("payee amount exceeds the principal");
+    if (!this.frozen || this.disputeId !== disputeId) fail("escrow not frozen for this dispute");
+    if (outcome !== VOTE_PAY && outcome !== VOTE_REFUND && outcome !== VOTE_SPLIT && outcome !== NO_OUTCOME) {
+      fail("invalid ruling outcome");
+    }
+    const [payeeAmount, payerAmount] = amounts.map((value) => amount(value));
+    if (outcome === VOTE_REFUND && payeeAmount !== 0n) {
+      fail("refund pays the payee nothing");
+    }
+    if (outcome === NO_OUTCOME && payeeAmount !== 0n) {
+      fail("no ruling pays the payee nothing");
+    }
+    if (payeeAmount + payerAmount !== this.vault) {
+      fail("ruling amounts must equal the vault balance");
+    }
     this.rulingExecuted = true;
-    this.vault -= payeeAmount;
-    return payeeAmount;
-  }
-
-  withdrawRemainder(caller = this.courtId) {
-    if (caller !== this.courtId) fail("only the court can withdraw the remainder");
-    if (!this.rulingExecuted) fail("no ruling has executed");
-    if (this.remainderWithdrawn) fail("remainder already withdrawn");
-    this.remainderWithdrawn = true;
-    const remainder = this.vault;
+    this.frozen = false;
     this.vault = 0n;
-    return remainder;
+    return [payeeAmount, payerAmount];
   }
 }
 
@@ -490,14 +495,21 @@ export class SimCourt {
     const escrow = this.escrows.get(dispute.escrowId);
     const amounts = settleAmounts(dispute.principal, outcome, first.count);
     const fees = amounts.fees;
-    const payeeMoved = escrow.executeRuling(disputeId, amounts.payeeAmount, this.courtId);
+    // One call returns both buckets: the payee amount and the gross
+    // payer amount. The court takes the fees out of the gross payer
+    // bucket before paying the payer the net amount.
+    const [payeeMoved, payerMovedGross] = escrow.executeRuling(
+      disputeId,
+      outcome,
+      [amounts.payeeAmount, amounts.payerAmount],
+      this.courtId,
+    );
     if (payeeMoved !== amounts.payeeAmount) fail("escrow paid a different amount than ruled");
-    const remainder = escrow.withdrawRemainder(this.courtId);
-    if (remainder !== dispute.principal - amounts.payeeAmount) {
-      fail("escrow remainder does not match the principal");
+    if (payerMovedGross !== amounts.payerAmount) {
+      fail("escrow paid a different payer amount than ruled");
     }
     this.feeVault += fees;
-    const payerMoved = remainder - fees;
+    const payerMoved = payerMovedGross - fees;
     this.fund(dispute.payee, payeeMoved);
     this.fund(dispute.payer, payerMoved);
     if (payeeMoved + payerMoved + fees !== dispute.principal) {
@@ -534,13 +546,14 @@ export class SimCourt {
     }
     dispute.outcome = outcome;
     dispute.payeeAmount = amounts.payeeAmount;
-    dispute.payerAmount = amounts.payerAmount;
+    dispute.payerAmount = payerMoved;
     dispute.feesPaid = fees;
     dispute.settled = true;
     return {
       outcome,
       payeeAmount: amounts.payeeAmount,
-      payerAmount: amounts.payerAmount,
+      payerAmount: payerMoved,
+      payerAmountGross: payerMovedGross,
       fees,
       leftoverAppealFee,
     };
@@ -726,11 +739,17 @@ export class SimCourt {
     }
     const escrow = this.escrows.get(dispute.escrowId);
     const principal = escrow.vault;
-    const payeeMoved = escrow.executeRuling(disputeId, 0n, this.courtId);
+    // One call returns both buckets: a payee amount of 0 and the whole
+    // principal as the gross payer amount. No fees are taken.
+    const [payeeMoved, payerMoved] = escrow.executeRuling(
+      disputeId,
+      NO_OUTCOME,
+      [0n, principal],
+      this.courtId,
+    );
     if (payeeMoved !== 0n) fail("no-ruling payee amount must be 0");
-    const remainder = escrow.withdrawRemainder(this.courtId);
-    if (remainder !== principal) fail("no-ruling remainder must be the whole principal");
-    this.fund(dispute.payer, remainder);
+    if (payerMoved !== principal) fail("no-ruling payer amount must be the whole principal");
+    this.fund(dispute.payer, payerMoved);
     const rulingPanel = dispute.appealed ? dispute.appealPanel : dispute.panel;
     const rulingReveals = dispute.appealed ? dispute.appealReveals : dispute.reveals;
     // Jurors who voted to refuse are neither paid nor slashed: they are
@@ -766,9 +785,9 @@ export class SimCourt {
     dispute.closedNoRuling = true;
     dispute.outcome = NO_OUTCOME;
     dispute.payeeAmount = 0n;
-    dispute.payerAmount = remainder;
+    dispute.payerAmount = payerMoved;
     dispute.feesPaid = 0n;
-    return { payerAmount: remainder, slashTotal };
+    return { payerAmount: payerMoved, slashTotal };
   }
 
   claimFee(disputeId, juror) {

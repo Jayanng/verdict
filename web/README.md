@@ -42,7 +42,7 @@ walletless simulation walkthrough.
 The proof page mirrors the template rules as they stand in
 `templates/verdict/src/lib.rs`: panel derivation from draw hash, dispute id,
 round, draw domain, and frozen pool; commitment hash of (vote, salt, dispute
-id, juror); `execute_ruling(dispute_id, payee_amount)` restricted by the
+id, juror); `execute_ruling(dispute_id, outcome, amounts)` restricted by the
 caller-component rule plus the in-method assert plus `OwnerRule::None`. The
 shared rules live in `src/verdict.js` and are imported by both the page and
 the tests. The mirror covers the settlement matrix, the quorum rule, the
@@ -79,8 +79,8 @@ No key is a real person, no hash is on chain, and no amount moved.
 
 ```sh
 npm test             # node --test tests/verdict.test.js, 32 tests
-npm run test:parity  # node --test tests/parity.test.js, 58 tests
-npm run test:all     # both suites, 90 tests
+npm run test:parity  # node --test tests/parity.test.js, 74 tests
+npm run test:all     # both suites, 106 tests
 ```
 
 The mirror suite checks the panel derivation, the vote commitment bytes, the

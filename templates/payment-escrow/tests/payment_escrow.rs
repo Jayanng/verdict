@@ -866,7 +866,7 @@ fn adapter_stranger_execute_rejected() {
         &mut setup,
         &stranger_secret,
         "execute_ruling",
-        args![0u64, 300_000u64],
+        args![0u64, VOTE_PAY, (300_000u64, 200_000u64)],
     );
     assert_reject_reason(
         &reason,
@@ -889,7 +889,11 @@ fn adapter_execute_without_freeze_fails() {
         setup
             .test
             .transaction()
-            .call_method(escrow, "execute_ruling", args![0u64, 300_000u64])
+            .call_method(
+                escrow,
+                "execute_ruling",
+                args![0u64, VOTE_PAY, (300_000u64, 200_000u64)],
+            )
             .build_and_seal(&payer_secret),
         vec![],
     );
@@ -915,7 +919,11 @@ fn adapter_execute_wrong_dispute_id_fails() {
         setup
             .test
             .transaction()
-            .call_method(escrow, "execute_ruling", args![1u64, 300_000u64])
+            .call_method(
+                escrow,
+                "execute_ruling",
+                args![1u64, VOTE_PAY, (300_000u64, 200_000u64)],
+            )
             .build_and_seal(&payer_secret),
         vec![],
     );
@@ -955,30 +963,14 @@ fn adapter_refund_returns_principal_less_juror_fees() {
 }
 
 #[test]
-fn adapter_withdraw_remainder_before_ruling_fails() {
+fn adapter_execute_amounts_not_summing_fails() {
+    // The owned twin lets the owner call execute_ruling directly, so the
+    // escrow's own sum check is what refuses amounts that do not add up
+    // to the vault balance.
     let mut setup = make_setup("new_owned");
     fund(&mut setup, AMOUNT);
     let payer_secret = setup.payer.secret.clone();
     let escrow = setup.escrow;
-    let reason = setup.test.execute_expect_failure(
-        setup
-            .test
-            .transaction()
-            .call_method(escrow, "withdraw_remainder", args![])
-            .build_and_seal(&payer_secret),
-        vec![],
-    );
-    assert_reject_reason(&reason, "no ruling has executed");
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), AMOUNT);
-}
-
-#[test]
-fn adapter_withdraw_remainder_twice_fails() {
-    let mut setup = make_setup("new_owned");
-    fund(&mut setup, AMOUNT);
-    let payer_secret = setup.payer.secret.clone();
-    let escrow = setup.escrow;
-    let payer_account = setup.payer.account;
     setup.test.execute_expect_success(
         setup
             .test
@@ -987,36 +979,104 @@ fn adapter_withdraw_remainder_twice_fails() {
             .build_and_seal(&payer_secret),
         vec![],
     );
-    setup.test.execute_expect_success(
-        setup
-            .test
-            .transaction()
-            .call_method(escrow, "execute_ruling", args![0u64, 300_000u64])
-            .put_last_instruction_output_on_workspace("ruling")
-            .call_method(setup.payee.account, "deposit", args![Workspace("ruling")])
-            .build_and_seal(&payer_secret),
-        vec![],
-    );
-    setup.test.execute_expect_success(
-        setup
-            .test
-            .transaction()
-            .call_method(escrow, "withdraw_remainder", args![])
-            .put_last_instruction_output_on_workspace("remainder")
-            .call_method(payer_account, "deposit", args![Workspace("remainder")])
-            .build_and_seal(&payer_secret),
-        vec![],
-    );
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
     let reason = setup.test.execute_expect_failure(
         setup
             .test
             .transaction()
-            .call_method(escrow, "withdraw_remainder", args![])
+            .call_method(
+                escrow,
+                "execute_ruling",
+                args![0u64, VOTE_PAY, (300_000u64, 199_999u64)],
+            )
             .build_and_seal(&payer_secret),
         vec![],
     );
-    assert_reject_reason(&reason, "remainder already withdrawn");
+    assert_reject_reason(&reason, "must equal the vault balance");
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), AMOUNT);
+    let executed: bool = setup
+        .test
+        .call_method(setup.escrow, "ruling_executed", args![], vec![]);
+    assert!(!executed);
+}
+
+#[test]
+fn adapter_execute_refund_nonzero_payee_fails() {
+    // A refund pays the payee nothing: a refund ruling that pays the
+    // payee is refused and leaves the escrow untouched.
+    let mut setup = make_setup("new_owned");
+    fund(&mut setup, AMOUNT);
+    let payer_secret = setup.payer.secret.clone();
+    let escrow = setup.escrow;
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(escrow, "freeze_for_dispute", args![0u64])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(
+                escrow,
+                "execute_ruling",
+                args![0u64, VOTE_REFUND, (300_000u64, 200_000u64)],
+            )
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "refund pays the payee nothing");
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), AMOUNT);
+    let executed: bool = setup
+        .test
+        .call_method(setup.escrow, "ruling_executed", args![], vec![]);
+    assert!(!executed);
+}
+
+#[test]
+fn adapter_execute_second_fails() {
+    // One call returns both buckets and empties the vault, so a second
+    // execute_ruling on the same dispute is refused. The first ruling
+    // runs through the court, which deposits both buckets, so no bucket
+    // is left dangling in the test transaction.
+    let mut setup = make_setup("new_owned");
+    fund(&mut setup, AMOUNT);
+    let jurors = register_jurors(&mut setup, 3);
+    let payer_secret = setup.payer.secret.clone();
+    let dispute_id = open_dispute(&mut setup, &payer_secret);
+    rule_dispute(
+        &mut setup,
+        &jurors,
+        dispute_id,
+        [VOTE_PAY, VOTE_PAY, VOTE_REFUND],
+    );
+    settle(&mut setup, &payer_secret, dispute_id);
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
+    let executed: bool = setup
+        .test
+        .call_method(setup.escrow, "ruling_executed", args![], vec![]);
+    assert!(executed);
+    let complete: bool = setup
+        .test
+        .call_method(setup.escrow, "is_complete", args![], vec![]);
+    assert!(complete);
+    let escrow = setup.escrow;
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(
+                escrow,
+                "execute_ruling",
+                args![0u64, VOTE_PAY, (300_000u64, 200_000u64)],
+            )
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "ruling already executed");
+    assert_eq!(vault_balance(&mut setup.test, setup.escrow), 0);
 }
 
 #[test]

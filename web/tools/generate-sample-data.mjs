@@ -73,26 +73,30 @@ function buildDispute(config) {
   // The amounts are computed from the votes by the same rules the
   // template settles with, never typed in by hand: the majority decides
   // the outcome, the juror fees come first from the principal, capped at
-  // the principal, and only the remainder is routed.
+  // the principal, and only the post-fee principal is routed. The sample
+  // stores the net payer amount, matching the template's
+  // dispute_payer_amount, and the gross payer amount the escrow routes.
   let outcome = null;
   let payeeAmount = null;
   let payerAmount = null;
+  let payerAmountGross = null;
   let fees = null;
   if (config.votes.length) {
     const majority = majorityOutcome(config.votes, panel.length);
     if (majority.vote === null) throw new Error(`sample dispute ${config.id} has no ruling`);
     outcome = OUTCOME_LABELS[majority.vote];
-    ({ fees, payeeAmount, payerAmount } = settleAmounts(
-      config.principal,
-      majority.vote,
-      majority.count,
-    ));
+    const amounts = settleAmounts(config.principal, majority.vote, majority.count);
+    fees = amounts.fees;
+    payeeAmount = amounts.payeeAmount;
+    payerAmount = amounts.payerAmountNet;
+    payerAmountGross = amounts.payerAmount;
   }
   return {
     ...config,
     outcome,
     payeeAmount,
     payerAmount,
+    payerAmountGross,
     fees,
     drawHash,
     panel: panel.map((j) => ({ key: j.key, label: j.label })),

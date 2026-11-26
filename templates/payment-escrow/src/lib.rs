@@ -3,7 +3,7 @@
 // One amount, one delivery. The payer funds the agreement, the payee marks
 // the work delivered, the payer approves, and approval releases the full
 // amount to the payee. Unreleased money is refundable to the payer after
-// the deadline. The escrow holds its own vault, and its two settlement
+// the deadline. The escrow holds its own vault, and its settlement
 // methods accept calls from exactly one component, the arbitrator (Verdict
 // court) named at creation. The court never touches the vault; the escrow's
 // own code moves it.
@@ -73,6 +73,13 @@ use tari_template_lib::prelude::*;
 mod payment_escrow {
     use super::*;
 
+    /// Ruling outcome values, matching the court's vote values:
+    /// pay 0, refund 1, split 2, no ruling 4.
+    const OUTCOME_PAY: u64 = 0;
+    const OUTCOME_REFUND: u64 = 1;
+    const OUTCOME_SPLIT: u64 = 2;
+    const OUTCOME_NO_RULING: u64 = 4;
+
     pub struct PaymentEscrow {
         /// The court component named at creation. Immutable, never changed.
         arbitrator: ComponentAddress,
@@ -94,9 +101,10 @@ mod payment_escrow {
         /// True once the payer has approved and the payment has been
         /// released.
         released: bool,
-        /// Total moved to the payee by a ruling, in microTari. A ruling
-        /// can move part of the payment, so this is tracked separately
-        /// from the released flag.
+        /// Total moved out by a ruling, in microTari: the payee amount
+        /// plus the gross payer amount. A ruling moves the whole vault
+        /// balance in one call, so this is tracked separately from the
+        /// released flag.
         ruled_amount: u64,
         /// True while a dispute is open on this escrow.
         frozen: bool,
@@ -104,10 +112,6 @@ mod payment_escrow {
         frozen_dispute_id: u64,
         /// True once a ruling has executed. A ruling executes at most once.
         ruling_executed: bool,
-        /// True once the remainder has been withdrawn to the payer after a
-        /// ruling. Set by withdraw_remainder, so the remainder can move
-        /// exactly once and no funds stay locked in the vault.
-        remainder_withdrawn: bool,
         /// True once the payer has cancelled the agreement.
         cancelled: bool,
         /// True once the payer has refunded the unreleased amount.
@@ -208,7 +212,6 @@ mod payment_escrow {
                 frozen: false,
                 frozen_dispute_id: 0,
                 ruling_executed: false,
-                remainder_withdrawn: false,
                 cancelled: false,
                 refunded: false,
                 assert_caller,
@@ -219,7 +222,6 @@ mod payment_escrow {
                 AccessRules::allow_all()
                     .add_method_rule("freeze_for_dispute", rule!(caller_component(arbitrator)))
                     .add_method_rule("execute_ruling", rule!(caller_component(arbitrator)))
-                    .add_method_rule("withdraw_remainder", rule!(caller_component(arbitrator)))
             };
             Component::new(state)
                 .with_access_rules(rules)
@@ -368,55 +370,70 @@ mod payment_escrow {
 
         /// Execute a ruling: move the escrow's own vault per the ruling.
         /// Only the arbitrator component, only while frozen for this
-        /// dispute, exactly once. Returns the payee's share as a bucket;
-        /// the remainder stays in the vault (the settlement matrix routes
-        /// the remainder). Conservation is exact: payee bucket + vault
-        /// remainder == funded total. This is the only settlement path:
-        /// it withdraws from the vault directly and never reuses approve
-        /// or any other payer-only method.
-        pub fn execute_ruling(&mut self, dispute_id: u64, payee_amount: u64) -> Bucket {
+        /// dispute, exactly once. Takes the outcome and the amounts pair
+        /// (payee amount, payer amount), where the payer amount is the
+        /// gross amount routed to the payer side, before the court takes
+        /// juror fees out of it, and the payee amount is net. Returns
+        /// both buckets in one atomic call, (payee bucket, payer bucket),
+        /// so no funds stay in the vault and no second call is needed.
+        /// The ruling is validated with checked arithmetic: the outcome
+        /// must be pay, refund, split, or no ruling; the two amounts
+        /// must sum to the vault balance exactly; a refund and a
+        /// no-ruling ruling pay the payee nothing. A ruling that fails
+        /// any of these is refused and leaves the escrow untouched.
+        /// Conservation is exact: payee bucket + payer bucket == vault
+        /// balance. This is the only settlement path: it withdraws from
+        /// the vault directly and never reuses approve or any other
+        /// payer-only method.
+        pub fn execute_ruling(
+            &mut self,
+            dispute_id: u64,
+            outcome: u64,
+            amounts: (u64, u64),
+        ) -> (Bucket, Bucket) {
             self.assert_arbitrator();
+            assert!(!self.ruling_executed, "ruling already executed");
             assert!(self.frozen, "escrow is not frozen for a dispute");
             assert_eq!(
                 dispute_id, self.frozen_dispute_id,
                 "dispute id does not match the frozen dispute"
             );
-            assert!(!self.ruling_executed, "ruling already executed");
+            assert!(
+                outcome == OUTCOME_PAY
+                    || outcome == OUTCOME_REFUND
+                    || outcome == OUTCOME_SPLIT
+                    || outcome == OUTCOME_NO_RULING,
+                "invalid ruling outcome"
+            );
+            let (payee_amount, payer_amount) = amounts;
+            if outcome == OUTCOME_REFUND {
+                assert!(payee_amount == 0, "refund pays the payee nothing");
+            }
+            if outcome == OUTCOME_NO_RULING {
+                assert!(payee_amount == 0, "no ruling pays the payee nothing");
+            }
             let balance = self
                 .vault
                 .balance()
                 .to_u64_checked()
                 .expect("vault balance out of range");
+            let total = payee_amount
+                .checked_add(payer_amount)
+                .expect("ruling amounts overflow");
             assert!(
-                payee_amount <= balance,
-                "payee amount exceeds the vault balance"
+                total == balance,
+                "ruling amounts must equal the vault balance"
             );
             self.ruling_executed = true;
             self.frozen = false;
             self.ruled_amount = self
                 .ruled_amount
-                .checked_add(payee_amount)
+                .checked_add(total)
                 .expect("ruled total overflow");
-            self.vault.withdraw(Amount::from_u64(payee_amount))
-        }
-
-        /// Withdraw the remainder to the payer after a ruling. Only the
-        /// arbitrator, only once, only after a ruling has executed. The
-        /// court calls this right after execute_ruling, so a split or a
-        /// refund never leaves funds locked in the vault. If the ruling
-        /// paid the full balance, the remainder is empty and this returns
-        /// an empty bucket.
-        pub fn withdraw_remainder(&mut self) -> Bucket {
-            self.assert_arbitrator();
-            assert!(self.ruling_executed, "no ruling has executed");
-            assert!(!self.remainder_withdrawn, "remainder already withdrawn");
-            self.remainder_withdrawn = true;
-            let balance = self
-                .vault
-                .balance()
-                .to_u64_checked()
-                .expect("vault balance out of range");
-            self.vault.withdraw(Amount::from_u64(balance))
+            (
+                self.vault.withdraw(Amount::from_u64(payee_amount)),
+                self.vault.withdraw(Amount::from_u64(payer_amount)),
+            )
         }
 
         // ----- read-only getters -----
@@ -454,13 +471,11 @@ mod payment_escrow {
         }
 
         pub fn is_complete(&self) -> bool {
-            self.released
-                || self.ruled_amount == self.amount
-                || (self.ruling_executed && self.remainder_withdrawn)
+            self.released || self.ruling_executed
         }
 
         /// True once the escrow can no longer change state: completed,
-        /// ruled with the remainder withdrawn, cancelled, or refunded.
+        /// ruled, cancelled, or refunded.
         pub fn is_terminal(&self) -> bool {
             self.is_complete() || self.cancelled || self.refunded
         }
