@@ -385,4 +385,13 @@ describe("BigInt settlement amounts", () => {
     assert.throws(() => splitLargestRemainder(10n, [2n, -1n]), /must not be negative/);
     assert.throws(() => splitLargestRemainder(-10n, [1n, 1n]), /must not be negative/);
   });
+
+  test("a negative or fractional Number total or weight is refused, not computed", () => {
+    assert.throws(() => splitLargestRemainder(-10, [1, 1]), /non-negative whole number/);
+    assert.throws(() => splitLargestRemainder(10, [-1, 2]), /non-negative whole numbers/);
+    assert.throws(() => splitLargestRemainder(10, [0.5, 0.5]), /non-negative whole numbers/);
+    assert.throws(() => splitLargestRemainder(10.5, [1, 1]), /non-negative whole number/);
+    assert.throws(() => splitLargestRemainder(2 ** 53, [1, 1]), /safe integer range/);
+    assert.deepEqual(splitLargestRemainder(10, [1, 1]), [5, 5]);
+  });
 });

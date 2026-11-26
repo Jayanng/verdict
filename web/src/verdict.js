@@ -306,6 +306,19 @@ export function splitLargestRemainder(total, weights) {
     }
     return out;
   }
+  // The Number branch validates the same way the BigInt branch does:
+  // the total and every weight must be a non-negative safe integer,
+  // or the call is refused. A negative total, a negative weight, or
+  // a fractional weight would otherwise produce negative or rounded
+  // shares with no error.
+  if (!Number.isSafeInteger(total) || total < 0) {
+    throw new Error("total must be a non-negative whole number within the safe integer range");
+  }
+  for (const w of weights) {
+    if (!Number.isSafeInteger(w) || w < 0) {
+      throw new Error("weights must be non-negative whole numbers within the safe integer range");
+    }
+  }
   const weightSum = weights.reduce((sum, w) => sum + w, 0);
   if (weightSum <= 0) throw new Error("weights must sum to more than 0");
   const exact = weights.map((w) => (total * w) / weightSum);
