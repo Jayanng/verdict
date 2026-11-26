@@ -18,6 +18,7 @@ import {
   SLASH,
   EVIDENCE_LIMIT,
   MIN_DRAW_DELAY,
+  MAX_RESCHEDULES,
   REVEAL_WINDOW,
   DRAW_DOMAIN_FIRST,
   DRAW_DOMAIN_APPEAL,
@@ -39,6 +40,26 @@ function fail(message) {
   throw new Error(message);
 }
 
+// Amounts in the simulation are BigInt, so amounts above the safe integer
+// range keep every micro-Tari. A Number amount must be a safe whole number;
+// anything else is refused rather than rounded or wrapped.
+function amount(value) {
+  if (typeof value === "bigint") {
+    if (value < 0n) fail("amount must not be negative");
+    return value;
+  }
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return BigInt(value);
+  }
+  throw new Error("amount must be a whole number of micro-Tari");
+}
+
+function validVote(vote) {
+  if (!Number.isInteger(vote) || vote < 0 || vote > VOTE_REFUSE) {
+    fail("invalid vote");
+  }
+}
+
 function defaultEpochHash(epoch) {
   return sha256Hex(`verdict-sim-epoch-${epoch}`);
 }
@@ -50,8 +71,8 @@ export class SimEscrow {
     this.id = id;
     this.payer = payer;
     this.payee = payee;
-    this.principal = principal;
-    this.vault = principal;
+    this.principal = amount(principal);
+    this.vault = this.principal;
     this.frozen = false;
     this.disputeId = null;
     this.rulingExecuted = false;
@@ -59,7 +80,7 @@ export class SimEscrow {
   }
 
   freezeForDispute(disputeId) {
-    if (this.vault <= 0) fail("escrow vault is empty");
+    if (this.vault <= 0n) fail("escrow vault is empty");
     if (this.frozen) fail("escrow already frozen for a dispute");
     this.frozen = true;
     this.disputeId = disputeId;
@@ -79,7 +100,7 @@ export class SimEscrow {
     if (this.remainderWithdrawn) fail("remainder already withdrawn");
     this.remainderWithdrawn = true;
     const remainder = this.vault;
-    this.vault = 0;
+    this.vault = 0n;
     return remainder;
   }
 }
@@ -95,16 +116,16 @@ export class SimCourt {
     this.bonds = new Map();
     this.escrows = new Map();
     this.disputes = [];
-    this.feeVault = 0;
+    this.feeVault = 0n;
     this.poolKeys = [...poolKeys];
   }
 
-  fund(account, amount) {
-    this.balances.set(account, (this.balances.get(account) || 0) + amount);
+  fund(account, value) {
+    this.balances.set(account, this.balance(account) + amount(value));
   }
 
   balance(account) {
-    return this.balances.get(account) || 0;
+    return this.balances.get(account) || 0n;
   }
 
   setEpoch(epoch) {
@@ -121,11 +142,12 @@ export class SimCourt {
 
   registerJuror(key, bond) {
     if (this.jurors.has(key)) fail("juror already registered");
-    if (bond < BOND_FLOOR) fail("bond below the floor");
-    if (this.balance(key) < bond) fail("insufficient balance to post the bond");
-    this.balances.set(key, this.balance(key) - bond);
-    this.jurors.set(key, { key, bond });
-    this.bonds.set(key, bond);
+    const bondAmount = amount(bond);
+    if (bondAmount < BigInt(BOND_FLOOR)) fail("bond below the floor");
+    if (this.balance(key) < bondAmount) fail("insufficient balance to post the bond");
+    this.balances.set(key, this.balance(key) - bondAmount);
+    this.jurors.set(key, { key, bond: bondAmount });
+    this.bonds.set(key, bondAmount);
     return key;
   }
 
@@ -134,9 +156,17 @@ export class SimCourt {
   }
 
   createEscrow(id, payer, payee, principal) {
-    if (this.balance(payer) < principal) fail("insufficient balance to fund the escrow");
-    this.balances.set(payer, this.balance(payer) - principal);
-    const escrow = new SimEscrow(id, payer, payee, principal);
+    if (this.escrows.has(id)) fail("escrow already exists");
+    if (typeof payer !== "string" || payer === "") fail("invalid payer");
+    if (typeof payee !== "string" || payee === "") fail("invalid payee");
+    if (payer === payee) fail("payee must differ from the payer");
+    const principalAmount = amount(principal);
+    if (principalAmount <= 0n) fail("principal must be more than 0");
+    if (this.balance(payer) < principalAmount) {
+      fail("insufficient balance to fund the escrow");
+    }
+    this.balances.set(payer, this.balance(payer) - principalAmount);
+    const escrow = new SimEscrow(id, payer, payee, principalAmount);
     this.escrows.set(id, escrow);
     return escrow;
   }
@@ -173,9 +203,9 @@ export class SimCourt {
       settled: false,
       closedNoRuling: false,
       outcome: NO_OUTCOME,
-      payeeAmount: 0,
-      payerAmount: 0,
-      feesPaid: 0,
+      payeeAmount: 0n,
+      payerAmount: 0n,
+      feesPaid: 0n,
       round: 0,
       replacementUsed: false,
       reschedules: 0,
@@ -188,7 +218,7 @@ export class SimCourt {
       commits: new Map(),
       reveals: new Map(),
       appealed: false,
-      appealFee: 0,
+      appealFee: 0n,
       appellantAccount: null,
       appealDrawEpoch: 0,
       appealDrawHash: null,
@@ -212,7 +242,9 @@ export class SimCourt {
     if (side !== 0 && side !== 1) fail("invalid evidence side");
     const party = side === 0 ? dispute.payer : dispute.payee;
     if (caller !== party) fail("only a party to the dispute can submit evidence");
-    if (index >= EVIDENCE_LIMIT) fail("evidence index out of range");
+    if (!Number.isInteger(index) || index < 0 || index >= EVIDENCE_LIMIT) {
+      fail("evidence index out of range");
+    }
     const slot = side === 0 ? dispute.payerEvidence : dispute.payeeEvidence;
     if (slot[index] !== null) fail("evidence already posted at this index");
     slot[index] = { side, index, sha256: hash, uri };
@@ -248,6 +280,7 @@ export class SimCourt {
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
     if (this.epoch <= dispute.drawEpoch) fail("draw epoch has not passed yet");
+    if (dispute.reschedules >= MAX_RESCHEDULES) fail("draw reschedule limit reached");
     dispute.drawEpoch = this.epoch + 1;
     dispute.reschedules += 1;
     return dispute.drawEpoch;
@@ -258,7 +291,7 @@ export class SimCourt {
     if (!dispute.drawn) fail("jury not drawn for this dispute");
     if (!dispute.panel.includes(juror)) fail("juror not drawn for this dispute");
     if (dispute.commits.has(juror)) fail("juror already committed a vote");
-    if (vote > VOTE_REFUSE) fail("invalid vote");
+    validVote(vote);
     const commitment = sha256Hex(voteCommitmentBytes(vote, salt, disputeId, juror));
     dispute.commits.set(juror, commitment);
     return commitment;
@@ -266,6 +299,7 @@ export class SimCourt {
 
   revealVote(disputeId, juror, vote, salt) {
     const dispute = this.dispute(disputeId);
+    validVote(vote);
     const stored = dispute.commits.get(juror);
     if (stored === undefined) fail("no vote commitment from this juror");
     if (dispute.reveals.has(juror)) fail("juror already revealed a vote");
@@ -312,17 +346,17 @@ export class SimCourt {
   }
 
   offenders(panel, reveals, outcome) {
-    return panel.filter(
-      (key) =>
-        reveals.has(key) && reveals.get(key) !== outcome && reveals.get(key) !== VOTE_REFUSE,
-    );
+    return panel.filter((key) => {
+      const vote = reveals.get(key);
+      return vote !== outcome && vote !== VOTE_REFUSE;
+    });
   }
 
   slashKeys(keys) {
-    let total = 0;
+    let total = 0n;
     for (const key of keys) {
-      const bond = this.bonds.get(key) || 0;
-      const slash = Math.min(SLASH, bond);
+      const bond = this.bonds.get(key) || 0n;
+      const slash = bond < BigInt(SLASH) ? bond : BigInt(SLASH);
       this.bonds.set(key, bond - slash);
       total += slash;
     }
@@ -331,16 +365,18 @@ export class SimCourt {
   }
 
   recordClaims(dispute, keys, feeTotal, slashTotal) {
-    const feeEach = keys.length ? Math.floor(feeTotal / keys.length) : 0;
+    const feeShares = keys.length
+      ? splitLargestRemainder(feeTotal, keys.map(() => 1))
+      : [];
     const slashShares = keys.length
       ? splitLargestRemainder(slashTotal, keys.map(() => 1))
       : [];
     keys.forEach((key, i) => {
-      const amount = feeEach + (slashShares[i] || 0);
-      if (amount > 0) {
+      const claimAmount = feeShares[i] + slashShares[i];
+      if (claimAmount > 0n) {
         const existing = dispute.claims.get(key);
         dispute.claims.set(key, {
-          amount: (existing?.amount || 0) + amount,
+          amount: (existing?.amount || 0n) + claimAmount,
           claimed: existing?.claimed || false,
         });
       }
@@ -361,6 +397,12 @@ export class SimCourt {
       outcome = appeal.vote;
     } else {
       outcome = first.vote;
+    }
+    // The reveal window must have passed before anyone can be slashed
+    // for not revealing: a juror inside their window is not an offender.
+    if (this.epoch < dispute.revealDeadline) fail("reveal window has not passed yet");
+    if (dispute.appealed && this.epoch < dispute.appealRevealDeadline) {
+      fail("appeal reveal window has not passed yet");
     }
     const escrow = this.escrows.get(dispute.escrowId);
     const amounts = settleAmounts(dispute.principal, outcome, first.count);
@@ -385,7 +427,7 @@ export class SimCourt {
       if (!firstSlashKeys.includes(key)) firstSlashKeys.push(key);
     }
     const firstSlash = this.slashKeys(firstSlashKeys);
-    let leftoverAppealFee = 0;
+    let leftoverAppealFee = 0n;
     if (dispute.appealed) {
       const appealMajority = this.majorityKeys(
         dispute.appealPanel,
@@ -398,12 +440,12 @@ export class SimCourt {
         if (!appealSlashKeys.includes(key)) appealSlashKeys.push(key);
       }
       const appealSlash = this.slashKeys(appealSlashKeys);
-      const appealFeeTotal = appealMajority.length * JUROR_FEE;
-      leftoverAppealFee = APPEAL_FEE - appealFeeTotal;
+      const appealFeeTotal = BigInt(appealMajority.length * JUROR_FEE);
+      leftoverAppealFee = BigInt(APPEAL_FEE) - appealFeeTotal;
       this.recordClaims(dispute, appealMajority, appealFeeTotal, appealSlash);
     }
     this.recordClaims(dispute, firstMajority, fees, firstSlash);
-    if (leftoverAppealFee > 0) {
+    if (leftoverAppealFee > 0n) {
       this.fund(dispute.appellantAccount, leftoverAppealFee);
       this.feeVault -= leftoverAppealFee;
     }
@@ -427,7 +469,8 @@ export class SimCourt {
     if (caller !== dispute.payer && caller !== dispute.payee) {
       fail("only a party to the dispute can appeal");
     }
-    if (fee !== APPEAL_FEE) fail("appeal fee must be exactly APPEAL_FEE");
+    const feeAmount = amount(fee);
+    if (feeAmount !== BigInt(APPEAL_FEE)) fail("appeal fee must be exactly APPEAL_FEE");
     if (!dispute.drawn) fail("jury not drawn for this dispute");
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
@@ -437,11 +480,11 @@ export class SimCourt {
     if (this.jurors.size < APPEAL_PANEL_SIZE) {
       fail("not enough eligible jurors to draw an appeal panel");
     }
-    if (this.balance(caller) < fee) fail("insufficient balance to post the appeal fee");
-    this.balances.set(caller, this.balance(caller) - fee);
-    this.feeVault += fee;
+    if (this.balance(caller) < feeAmount) fail("insufficient balance to post the appeal fee");
+    this.balances.set(caller, this.balance(caller) - feeAmount);
+    this.feeVault += feeAmount;
     dispute.appealed = true;
-    dispute.appealFee = fee;
+    dispute.appealFee = feeAmount;
     dispute.appellantAccount = caller;
     dispute.appealDrawEpoch = this.epoch + drawDelay;
     return dispute.appealDrawEpoch;
@@ -483,6 +526,9 @@ export class SimCourt {
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
     if (this.epoch <= dispute.appealDrawEpoch) fail("appeal draw epoch has not passed yet");
+    if (dispute.appealReschedules >= MAX_RESCHEDULES) {
+      fail("appeal draw reschedule limit reached");
+    }
     dispute.appealDrawEpoch = this.epoch + 1;
     dispute.appealReschedules += 1;
     return dispute.appealDrawEpoch;
@@ -494,7 +540,7 @@ export class SimCourt {
     if (!dispute.appealDrawn) fail("appeal jury not drawn");
     if (!dispute.appealPanel.includes(juror)) fail("juror not drawn for this appeal");
     if (dispute.appealCommits.has(juror)) fail("juror already committed an appeal vote");
-    if (vote > VOTE_REFUSE) fail("invalid vote");
+    validVote(vote);
     const commitment = sha256Hex(voteCommitmentBytes(vote, salt, disputeId, juror));
     dispute.appealCommits.set(juror, commitment);
     return commitment;
@@ -502,6 +548,7 @@ export class SimCourt {
 
   revealAppealVote(disputeId, juror, vote, salt) {
     const dispute = this.dispute(disputeId);
+    validVote(vote);
     const stored = dispute.appealCommits.get(juror);
     if (stored === undefined) fail("no appeal vote commitment from this juror");
     if (dispute.appealReveals.has(juror)) fail("juror already revealed an appeal vote");
@@ -543,59 +590,71 @@ export class SimCourt {
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute already closed with no ruling");
     if (!dispute.drawn) fail("jury not drawn for this dispute");
-    const roundDone = dispute.reveals.size === dispute.panel.length;
-    const appealDone =
-      dispute.appealed &&
+    // A round is finished when it is fully revealed. A replacement
+    // round is also finished once its own reveal window has passed with
+    // no majority, so the replacement round always gets its full window
+    // to vote before the close can run.
+    const roundFinished =
+      dispute.drawn &&
+      (dispute.reveals.size === dispute.panel.length ||
+        (dispute.replacementUsed && this.epoch >= dispute.revealDeadline));
+    const appealFinished =
       dispute.appealDrawn &&
-      dispute.appealReveals.size === dispute.appealPanel.length;
+      (dispute.appealReveals.size === dispute.appealPanel.length ||
+        (dispute.appealReplacementUsed && this.epoch >= dispute.appealRevealDeadline));
     const firstNoMajority = this.firstOutcome(dispute).vote === null;
     const appealNoMajority = this.appealOutcome(dispute).vote === null;
     if (dispute.appealed) {
-      if (!(appealNoMajority && (dispute.appealReplacementUsed || appealDone))) {
+      if (!(appealNoMajority && appealFinished)) {
         fail("appeal round can still reach a ruling");
       }
-    } else if (!(firstNoMajority && (dispute.replacementUsed || roundDone))) {
+    } else if (!(firstNoMajority && roundFinished)) {
       fail("first round can still reach a ruling");
     }
     const escrow = this.escrows.get(dispute.escrowId);
     const principal = escrow.vault;
-    const payeeMoved = escrow.executeRuling(disputeId, 0);
-    if (payeeMoved !== 0) fail("no-ruling payee amount must be 0");
+    const payeeMoved = escrow.executeRuling(disputeId, 0n);
+    if (payeeMoved !== 0n) fail("no-ruling payee amount must be 0");
     const remainder = escrow.withdrawRemainder();
     if (remainder !== principal) fail("no-ruling remainder must be the whole principal");
     this.fund(dispute.payer, remainder);
     const rulingPanel = dispute.appealed ? dispute.appealPanel : dispute.panel;
-    const rulingReveals = dispute.appealed
-      ? [...dispute.appealReveals.keys()]
-      : [...dispute.reveals.keys()];
+    const rulingReveals = dispute.appealed ? dispute.appealReveals : dispute.reveals;
+    // Jurors who voted to refuse are neither paid nor slashed: they are
+    // left out of the payable set, and they revealed, so they are left
+    // out of the slash set too.
+    const revealedKeys = [...rulingReveals.keys()];
+    const payableKeys = [...rulingReveals.entries()]
+      .filter(([, vote]) => vote !== VOTE_REFUSE)
+      .map(([key]) => key);
     const failedJurors = dispute.appealed
       ? dispute.appealFailedJurors
       : dispute.failedJurors;
-    let slashTotal = 0;
-    if (rulingReveals.length > 0) {
-      const slashKeys = rulingPanel.filter((key) => !rulingReveals.includes(key));
+    let slashTotal = 0n;
+    if (payableKeys.length > 0) {
+      const slashKeys = rulingPanel.filter((key) => !revealedKeys.includes(key));
       for (const key of failedJurors) {
         if (!slashKeys.includes(key)) slashKeys.push(key);
       }
       slashTotal = this.slashKeys(slashKeys);
-      if (slashTotal > 0) {
-        const shares = splitLargestRemainder(slashTotal, rulingReveals.map(() => 1));
-        rulingReveals.forEach((key, i) => {
-          if (shares[i] > 0) {
+      if (slashTotal > 0n) {
+        const shares = splitLargestRemainder(slashTotal, payableKeys.map(() => 1));
+        payableKeys.forEach((key, i) => {
+          if (shares[i] > 0n) {
             dispute.claims.set(key, { amount: shares[i], claimed: false });
           }
         });
       }
     }
-    if (dispute.appealed && dispute.appealFee > 0) {
+    if (dispute.appealed && dispute.appealFee > 0n) {
       this.fund(dispute.appellantAccount, dispute.appealFee);
       this.feeVault -= dispute.appealFee;
     }
     dispute.closedNoRuling = true;
     dispute.outcome = NO_OUTCOME;
-    dispute.payeeAmount = 0;
+    dispute.payeeAmount = 0n;
     dispute.payerAmount = remainder;
-    dispute.feesPaid = 0;
+    dispute.feesPaid = 0n;
     return { payerAmount: remainder, slashTotal };
   }
 
@@ -604,7 +663,7 @@ export class SimCourt {
     const claim = dispute.claims.get(juror);
     if (!claim) fail("no fee claim for this juror");
     if (claim.claimed) fail("fee already claimed");
-    if (claim.amount <= 0) fail("no fee owed for this dispute");
+    if (claim.amount <= 0n) fail("no fee owed for this dispute");
     if (this.feeVault < claim.amount) fail("fee vault cannot cover the claim");
     this.feeVault -= claim.amount;
     claim.claimed = true;
@@ -614,7 +673,7 @@ export class SimCourt {
 
   disputeClaim(disputeId, juror) {
     const dispute = this.dispute(disputeId);
-    return dispute.claims.get(juror)?.amount || 0;
+    return dispute.claims.get(juror)?.amount || 0n;
   }
 
   // A plain snapshot of a dispute for the walkthrough page.

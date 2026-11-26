@@ -184,19 +184,22 @@ fn open_dispute_on(
     setup.test.expect_return(0)
 }
 
+/// Settle a dispute. Settle runs only once the reveal window has
+/// passed, so the epoch moves to the reveal deadline first.
 fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64) {
+    let deadline: u64 = setup.test.call_method(
+        setup.verdict,
+        "dispute_reveal_deadline",
+        args![dispute_id],
+        vec![],
+    );
+    set_epoch(&mut setup.test, deadline);
     let verdict = setup.verdict;
-    let payee_account = setup.payee.account;
-    let payer_account = setup.payer.account;
     setup.test.execute_expect_success(
         setup
             .test
             .transaction()
-            .call_method(
-                verdict,
-                "settle",
-                args![dispute_id, payee_account, payer_account],
-            )
+            .call_method(verdict, "settle", args![dispute_id])
             .build_and_seal(signer),
         vec![],
     );
@@ -376,17 +379,11 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
 
     // Second settle of the same dispute must fail: the ruling executes once.
     let verdict = setup.verdict;
-    let payee_account = setup.payee.account;
-    let payer_account = setup.payer.account;
     let reason = setup.test.execute_expect_failure(
         setup
             .test
             .transaction()
-            .call_method(
-                verdict,
-                "settle",
-                args![dispute_id, payee_account, payer_account],
-            )
+            .call_method(verdict, "settle", args![dispute_id])
             .build_and_seal(&payer_secret),
         vec![],
     );

@@ -244,20 +244,24 @@ fn open_dispute(setup: &mut Setup, signer: &RistrettoSecretKey) -> u64 {
 }
 
 /// Settle a dispute through the court. The ruling is derived from the
-/// revealed votes by the court; the caller only names the accounts.
+/// revealed votes by the court, and the payout accounts are derived from
+/// the escrow by the court, so the caller names nothing. Settle runs only
+/// once the reveal window has passed, so the epoch moves to the reveal
+/// deadline first.
 fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64) {
+    let deadline: u64 = setup.test.call_method(
+        setup.verdict,
+        "dispute_reveal_deadline",
+        args![dispute_id],
+        vec![],
+    );
+    set_epoch(&mut setup.test, deadline);
     let verdict = setup.verdict;
-    let payee_account = setup.payee.account;
-    let payer_account = setup.payer.account;
     setup.test.execute_expect_success(
         setup
             .test
             .transaction()
-            .call_method(
-                verdict,
-                "settle",
-                args![dispute_id, payee_account, payer_account],
-            )
+            .call_method(verdict, "settle", args![dispute_id])
             .build_and_seal(signer),
         vec![],
     );
@@ -823,17 +827,11 @@ fn adapter_freeze_and_execute_once() {
         .call_method(setup.escrow, "ruling_executed", args![], vec![]);
     assert!(executed);
     let verdict = setup.verdict;
-    let payee_account = setup.payee.account;
-    let payer_account = setup.payer.account;
     let reason = setup.test.execute_expect_failure(
         setup
             .test
             .transaction()
-            .call_method(
-                verdict,
-                "settle",
-                args![dispute_id, payee_account, payer_account],
-            )
+            .call_method(verdict, "settle", args![dispute_id])
             .build_and_seal(&payer_secret),
         vec![],
     );

@@ -18,6 +18,8 @@ import {
   REVEAL_WINDOW,
   DRAW_DOMAIN_FIRST,
   DRAW_DOMAIN_APPEAL,
+  DRAW_DOMAIN_SCALE,
+  MAX_RESCHEDULES,
   VOTE_PAY,
   VOTE_REFUND,
   VOTE_SPLIT,
@@ -292,5 +294,68 @@ describe("sample data consistency", () => {
         `dispute ${dispute.id} conservation`,
       );
     }
+  });
+});
+
+describe("hexToBytes", () => {
+  test("bad hex is rejected instead of becoming null bytes", () => {
+    assert.throws(() => hexToBytes("zz"), /only hex characters/);
+    assert.throws(() => hexToBytes("0x12g4"), /only hex characters/);
+    assert.throws(() => hexToBytes("abc"), /even length/);
+    assert.throws(() => hexToBytes(123), /must be a string/);
+    assert.deepEqual([...hexToBytes("0x00ff")], [0, 255]);
+    assert.deepEqual([...hexToBytes("aAbB")], [0xaa, 0xbb]);
+  });
+});
+
+describe("u64ToLeBytes", () => {
+  test("negatives, fractions, and out-of-range values are rejected, not wrapped", () => {
+    assert.throws(() => u64ToLeBytes(-1), /out of range/);
+    assert.throws(() => u64ToLeBytes(1.5), /whole number/);
+    assert.throws(() => u64ToLeBytes(2n ** 64n), /out of range/);
+    assert.throws(() => u64ToLeBytes("12"), /whole number/);
+    assert.deepEqual([...u64ToLeBytes(0n)], [0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(
+      [...u64ToLeBytes(0xffffffffffffffffn)],
+      [255, 255, 255, 255, 255, 255, 255, 255],
+    );
+    assert.deepEqual([...u64ToLeBytes(258)], [2, 1, 0, 0, 0, 0, 0, 0]);
+  });
+});
+
+describe("domain separation", () => {
+  test("the domain is scaled, so round 1 domain 0 and round 0 domain 1 differ", () => {
+    assert.equal(DRAW_DOMAIN_SCALE, 1000000007);
+    assert.equal(MAX_RESCHEDULES, 3);
+    const pool = ["a", "b", "c", "d", "e", "f", "g"];
+    const hash = sha256Hex("domain-separation-check");
+    const first = derivePanel(pool, hash, 0, 1, DRAW_DOMAIN_FIRST, 3);
+    const appeal = derivePanel(pool, hash, 0, 0, DRAW_DOMAIN_APPEAL, 3);
+    assert.notDeepEqual(first, appeal);
+    assert.notDeepEqual(
+      derivePanel(pool, hash, 0, 0, DRAW_DOMAIN_FIRST, 3),
+      derivePanel(pool, hash, 0, 0, DRAW_DOMAIN_APPEAL, 3),
+    );
+  });
+});
+
+describe("BigInt settlement amounts", () => {
+  test("a principal above the safe integer range keeps every micro-Tari", () => {
+    const principal = 9007199254740993n;
+    assert.deepEqual(settleAmounts(principal, VOTE_PAY, 2), {
+      fees: 10000n,
+      payeeAmount: principal - 10000n,
+      payerAmount: 0n,
+    });
+    const split = settleAmounts(principal, VOTE_SPLIT, 2);
+    assert.equal(split.payeeAmount + split.payerAmount + split.fees, principal);
+    assert.equal(split.payeeAmount - split.payerAmount, 1n);
+    assert.throws(() => settleAmounts(9007199254740993, VOTE_PAY, 2), /whole number/);
+  });
+
+  test("splitLargestRemainder in BigInt conserves exactly", () => {
+    const parts = splitLargestRemainder(10000000000000000003n, [3n, 2n, 1n]);
+    assert.equal(parts.reduce((a, b) => a + b, 0n), 10000000000000000003n);
+    assert.deepEqual(splitLargestRemainder(10n, [1, 1, 1]), [4n, 3n, 3n]);
   });
 });

@@ -211,7 +211,7 @@ function renderDispute(id) {
         <div class="fact"><div class="k">Majority</div><div class="v">${majority ? `${majority.count} of ${d.reveals.length} jurors` : "none"}</div></div>
         <div class="fact"><div class="k">Settlement record</div><div class="v mono">${esc(d.settlementTx)}</div></div>
       </div>
-      <p class="sec-note" style="margin-top: 16px;">Routing as the templates settle it: the court calls execute_ruling with the payee amount, the payee bucket goes to the payee account, the juror fees come first from the remainder bucket into the fee vault, and what is left of the remainder goes straight to the payer account. The settlement record above is a sample label, not a transaction on chain. Payee, payer, and fees always sum to the principal exactly.</p>
+      <p class="sec-note" style="margin-top: 16px;">Routing as the templates settle it: the court calls execute_ruling with the payee amount, the payee bucket goes to the payee account the court derives from the escrow, the juror fees come first from the remainder bucket into the fee vault, and what is left of the remainder goes straight to the payer account the court derives from the escrow. The settlement record above is a sample label, not a transaction on chain. Payee, payer, and fees always sum to the principal exactly.</p>
     </div>` : `
     <div class="rui-card mt-24">
       <h3>Ruling: not yet made</h3>
@@ -864,7 +864,10 @@ function runWalkthrough() {
   appealPanel.forEach((juror, i) => court.commitAppealVote(disputeId, juror, appealVotes[i], simSalt(i + 20)));
   appealPanel.forEach((juror, i) => court.revealAppealVote(disputeId, juror, appealVotes[i], simSalt(i + 20)));
   step(8, "Appeal votes revealed: refund, refund, refund, refund, pay, pay, pay. Four of seven is a majority for refund.");
-  // Step 9: settle the appeal and claim the fees.
+  // Step 9: settle the appeal and claim the fees. Settle runs only once
+  // the reveal window has passed, so the epoch moves to the appeal reveal
+  // deadline first: the appeal was drawn at epoch 4, so its deadline is 6.
+  court.setEpoch(6);
   const appealed = court.settle(disputeId);
   step(9, `Appeal settled. The first ruling is overturned: payer gets ${fmt(appealed.payerAmount)} micro-Tari back, plus ${fmt(appealed.leftoverAppealFee)} unspent appeal fee. Payer net from the start is minus 30,000: the 10,000 first-round juror fees plus the 20,000 appeal juror fees, both taken from money she put in. Payee, payer, and fees sum to 500,000 exactly.`);
   const snapshot = court.snapshot(disputeId);

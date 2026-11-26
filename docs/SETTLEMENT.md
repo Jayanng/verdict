@@ -10,9 +10,13 @@ All costs of a dispute settle from the disputed principal, never from outside
 it. There is no separate fee pot that can run dry, and no outcome where the
 loser walks away while someone else funds the court.
 
-The ruling is the majority of the revealed votes, derived by the court from
-the commit-reveal record. No caller supplies the amount. `settle` takes only
-the dispute id and the two accounts the money goes to.
+The ruling is the majority of the full panel, derived by the court from
+the commit-reveal record. No caller supplies the amount, and no caller
+supplies the payout accounts: `settle` and `close_no_ruling` take only the
+dispute id. The court reads the payer and payee keys from the escrow and
+derives their accounts from those keys, the same derivation the engine
+uses for an account created for a key, so the proceeds can only land with
+the parties to the deal.
 
 ## Constants
 
@@ -26,7 +30,8 @@ the dispute id and the two accounts the money goes to.
 | Bond floor | 30,000 | Twice the largest juror fee times the panel size |
 | Minimum draw delay | 1 epoch | Every draw commits to a future epoch at least one epoch ahead |
 | Reveal window | 2 epochs | Time a drawn juror has to reveal, counted from the draw epoch |
-| Draw domain | 0 first round, 1 appeal | Folded into the panel derivation, so the two rounds never draw the same panel from the same hash |
+| Draw domain | 0 first round, 1 appeal | Multiplied by 1,000,000,007 before it is added to the panel derivation, so the two rounds never draw the same panel from the same hash |
+| Reschedule cap | 3 per draw | A missed draw window can be rescheduled at most three times |
 
 ## Draw rules
 
@@ -44,16 +49,20 @@ into a dispute that cannot draw, and a draw never returns a short panel.
 A missed draw window is rescheduled past the current epoch: the new draw
 epoch is the current epoch plus one, never the current epoch itself, so a
 rescheduled draw still uses a future epoch hash. The reschedule is
-recorded on chain.
+recorded on chain. A draw can be rescheduled at most three times: after
+the third reschedule the draw must execute in its locked epoch.
 
 The panel derivation folds in a draw domain: 0 for the first round, 1
-for the appeal. The same hash, pool, dispute id, and round nonce can
-never produce the same panel across the two rounds.
+for the appeal, multiplied by 1,000,000,007 before it is added. The same
+hash, pool, dispute id, and round nonce can never produce the same panel
+across the two rounds: a domain step moves the sum far more than any round
+step can.
 
-A majority is a strict majority of the revealed votes, with at least a
-majority of the panel revealed: two of three for a first round, four of
-seven for an appeal. A vote to refuse arbitration is valid, but it never
-counts toward an outcome, and a refusing juror is neither paid nor slashed.
+A majority is a strict majority of the full panel, with at least a
+majority of the panel revealed first: two matching votes of three for a
+first round, four matching votes of seven for an appeal. A vote to refuse
+arbitration is valid, but it never counts toward an outcome, and a
+refusing juror is neither paid nor slashed.
 
 ## The matrix
 
@@ -88,6 +97,12 @@ the principal: the payee and the payer both keep nothing, and the majority
 jurors split the capped fees by largest remainder. Costs never exceed the
 principal.
 
+Settle runs only once the reveal window has passed. The current epoch must
+be at or past the first-round reveal deadline, and, when the dispute is
+under appeal, at or past the appeal reveal deadline too. A juror who still
+has time to reveal is never counted among the offenders and slashed by an
+early settle: settle cannot run early at all.
+
 ## Juror fees and slashing
 
 Each juror in the ruling majority is owed one juror fee, plus a share of the
@@ -100,7 +115,9 @@ a vote, or reveal a vote against the majority. The forfeit is capped by the
 bond the juror still holds. A juror who votes to refuse arbitration forfeits
 nothing. A juror who fails to reveal in a replaced round is slashed once,
 even if the replacement draws them again and they vote with the new
-majority.
+majority. Failed jurors are kept per round: bonds forfeited by first-round
+failures top up the first-round majority only, and bonds forfeited by
+appeal failures top up the appeal majority only.
 
 A juror who is in the majority of both rounds is owed the fee for each
 round, and the two claims are added into one. Fees are claimed with
@@ -154,16 +171,22 @@ the reschedule is recorded on chain.
 ## No-ruling fallback
 
 The bounded exit of the ladder. A dispute closes with no ruling when no
-ruling can be reached: either the replacement draw has been used and the new
-round still has no majority, or a round is fully revealed with no majority.
-The same rule applies to the appeal round.
+ruling can be reached and the current round is finished. A round is
+finished when it is fully revealed. A replacement round is also finished
+once its own reveal window has passed with no majority, so the replacement
+round always gets its full window to vote before the close can run, and a
+round that stalls after its replacement still exits instead of staying
+frozen. The same rule applies to the appeal round.
 
 The close executes a ruling with a payee amount of 0, which unfreezes the escrow, and the whole
 principal returns to the payer: the opener's fee is refunded in full, and
-no juror fee is taken. Jurors who were drawn and did not reveal are
-slashed, and the forfeited bonds go to the jurors who did reveal, split by
-largest remainder. When nobody revealed, nobody is slashed: there is no one
-to pay, and the court keeps nothing. An unspent appeal fee returns to the
+no juror fee is taken. The payer account is derived from the escrow, never
+taken from the caller. Jurors who were drawn and did not reveal are
+slashed, and the forfeited bonds go to the jurors who did reveal, other
+than jurors who voted to refuse: a refusing juror is neither paid nor
+slashed. When nobody who revealed is payable, nobody is slashed: there is
+no one to pay, and the court keeps nothing. Failed jurors are kept per
+round, so an appeal close slashes appeal failures only. An unspent appeal fee returns to the
 appellant in full. A closed dispute can never settle, and the escrow is
 terminal: completed, cancelled, refunded, or ruled with the remainder
 withdrawn.

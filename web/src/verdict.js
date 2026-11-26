@@ -16,6 +16,11 @@ export const MIN_DRAW_DELAY = 1;
 export const REVEAL_WINDOW = 2;
 export const DRAW_DOMAIN_FIRST = 0;
 export const DRAW_DOMAIN_APPEAL = 1;
+// The domain is multiplied by this before it is added to the panel
+// derivation, so a domain step can never match a round step.
+export const DRAW_DOMAIN_SCALE = 1000000007;
+// Times a missed draw window can be rescheduled, per draw.
+export const MAX_RESCHEDULES = 3;
 
 export const VOTE_PAY = 0;
 export const VOTE_REFUND = 1;
@@ -30,8 +35,12 @@ export const VOTE_LABELS = {
 };
 
 export function hexToBytes(hex) {
+  if (typeof hex !== "string") throw new Error("hex string must be a string");
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
   if (clean.length % 2 !== 0) throw new Error("hex string must have an even length");
+  if (!/^[0-9a-fA-F]*$/.test(clean)) {
+    throw new Error("hex string must contain only hex characters");
+  }
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i += 1) {
     out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
@@ -44,7 +53,15 @@ export function bytesToHex(bytes) {
 }
 
 export function u64ToLeBytes(value) {
-  const v = BigInt(value);
+  let v;
+  if (typeof value === "bigint") {
+    v = value;
+  } else if (typeof value === "number" && Number.isInteger(value)) {
+    v = BigInt(value);
+  } else {
+    throw new Error("u64 value must be a whole number");
+  }
+  if (v < 0n || v > 0xffffffffffffffffn) throw new Error("u64 value out of range");
   const out = new Uint8Array(8);
   for (let i = 0; i < 8; i += 1) {
     out[i] = Number((v >> BigInt(8 * i)) & 0xffn);
@@ -138,12 +155,13 @@ export function voteCommitmentBytes(vote, saltHex, disputeId, jurorHex) {
 
 // The panel derivation, exactly as the template derives it. For each slot,
 // read an 8-byte window of the draw hash, fold in the dispute id, the round,
-// the draw domain, and the slot, take the result modulo the pool size, and
-// probe forward until an unpicked juror is found. Returns the panel as pool
-// indices, in order. Arithmetic is BigInt so the 64-bit wrapping add matches
-// the template. The domain is 0 for a first round and 1 for an appeal, so
-// the two rounds never draw the same panel from the same hash. The pool must
-// already hold a full panel, or the draw is refused.
+// the draw domain multiplied by DRAW_DOMAIN_SCALE, and the slot, take the
+// result modulo the pool size, and probe forward until an unpicked juror is
+// found. Returns the panel as pool indices, in order. Arithmetic is BigInt
+// so the 64-bit wrapping add matches the template. The domain is 0 for a
+// first round and 1 for an appeal, so the two rounds never draw the same
+// panel from the same hash. The pool must already hold a full panel, or the
+// draw is refused.
 export function derivePanel(pool, drawHashHex, disputeId, round, domain = DRAW_DOMAIN_FIRST, size = PANEL_SIZE) {
   const hashBytes = hexToBytes(drawHashHex);
   if (hashBytes.length !== 32) throw new Error("draw hash must be 32 bytes");
@@ -162,7 +180,9 @@ export function derivePanel(pool, drawHashHex, disputeId, round, domain = DRAW_D
     for (let i = 0; i < 8; i += 1) {
       value |= BigInt(window[i]) << BigInt(8 * i);
     }
-    const sum = (value + BigInt(disputeId) + BigInt(round) + BigInt(domain) + BigInt(slot)) % two64;
+    const sum =
+      (value + BigInt(disputeId) + BigInt(round) + BigInt(domain) * BigInt(DRAW_DOMAIN_SCALE) + BigInt(slot)) %
+      two64;
     let candidate = Number(sum % BigInt(poolLen));
     while (panel.includes(candidate)) {
       candidate = (candidate + 1) % poolLen;
@@ -172,13 +192,14 @@ export function derivePanel(pool, drawHashHex, disputeId, round, domain = DRAW_D
   return panel;
 }
 
-// Majority of the revealed votes, exactly as the template rules it. First,
+// Majority of the full panel, exactly as the template rules it. First,
 // at least a majority of the panel must have revealed at all, which is the
 // quorum. Then one of pay, refund, or split must hold a strict majority of
-// the revealed votes. Refuse votes never count toward an outcome: a panel
-// that only refuses has no ruling. Returns { vote, count } or
-// { vote: null, count: 0 } when there is no ruling, which is the case the
-// replacement draw and the fallback paths handle.
+// the full panel: two matching votes of three for a first round, four
+// matching votes of seven for an appeal. Refuse votes never count toward
+// an outcome: a panel that only refuses has no ruling. Returns
+// { vote, count } or { vote: null, count: 0 } when there is no ruling,
+// which is the case the replacement draw and the fallback paths handle.
 export function majorityOutcome(reveals, panelSize = PANEL_SIZE) {
   const quorum = Math.floor(panelSize / 2) + 1;
   if (reveals.length < quorum) return { vote: null, count: 0 };
@@ -195,7 +216,7 @@ export function majorityOutcome(reveals, panelSize = PANEL_SIZE) {
       bestCount = count;
     }
   }
-  if (best !== null && bestCount * 2 > reveals.length) {
+  if (best !== null && bestCount * 2 > panelSize) {
     return { vote: best, count: bestCount };
   }
   return { vote: null, count: bestCount };
@@ -207,26 +228,65 @@ export function majorityOutcome(reveals, panelSize = PANEL_SIZE) {
 // refund returns it to the payer, split divides it by largest remainder,
 // with the odd micro-Tari to the payee. Returns { fees, payeeAmount,
 // payerAmount }. Slashed bonds top up majority juror claims on top of the
-// fee, and are paid through claim_fee, not through this routing.
+// fee, and are paid through claim_fee, not through this routing. Amounts
+// are BigInt end to end when the principal is a BigInt, so amounts above
+// the safe integer range keep every micro-Tari; a Number principal keeps
+// the Number behaviour the page already uses.
+function amountToBigInt(value) {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return BigInt(value);
+  }
+  throw new Error("amount must be a whole number of micro-Tari");
+}
+
 export function settleAmounts(principal, outcome, majorityCount) {
-  const fees = Math.min(JUROR_FEE * majorityCount, principal);
-  const postFee = principal - fees;
+  const asBigInt = typeof principal === "bigint";
+  const p = amountToBigInt(principal);
+  const count = amountToBigInt(majorityCount);
+  const fees = p < BigInt(JUROR_FEE) * count ? p : BigInt(JUROR_FEE) * count;
+  const postFee = p - fees;
+  const done = (payeeAmount, payerAmount) => ({
+    fees: asBigInt ? fees : Number(fees),
+    payeeAmount: asBigInt ? payeeAmount : Number(payeeAmount),
+    payerAmount: asBigInt ? payerAmount : Number(payerAmount),
+  });
   if (outcome === VOTE_PAY) {
-    return { fees, payeeAmount: postFee, payerAmount: 0 };
+    return done(postFee, 0n);
   }
   if (outcome === VOTE_REFUND) {
-    return { fees, payeeAmount: 0, payerAmount: postFee };
+    return done(0n, postFee);
   }
   if (outcome === VOTE_SPLIT) {
-    const [payeeAmount, payerAmount] = splitLargestRemainder(postFee, [1, 1]);
-    return { fees, payeeAmount, payerAmount };
+    const [payeeAmount, payerAmount] = splitLargestRemainder(postFee, [1n, 1n]);
+    return done(payeeAmount, payerAmount);
   }
   throw new Error("settleAmounts needs a ruled outcome: pay, refund, or split");
 }
 
 // Split a total across weights by largest remainder, so the parts always sum
 // to the total exactly, to the micro-Tari. Ties break toward the earlier part.
+// A BigInt total splits in BigInt; a Number total keeps the Number behaviour.
 export function splitLargestRemainder(total, weights) {
+  if (typeof total === "bigint") {
+    const bigWeights = weights.map((w) => amountToBigInt(w));
+    const weightSum = bigWeights.reduce((sum, w) => sum + w, 0n);
+    if (weightSum <= 0n) throw new Error("weights must sum to more than 0");
+    const floors = bigWeights.map((w) => (total * w) / weightSum);
+    const remainders = bigWeights.map((w) => (total * w) % weightSum);
+    let assigned = floors.reduce((sum, x) => sum + x, 0n);
+    const order = remainders
+      .map((r, i) => ({ i, r }))
+      .sort((a, b) => (a.r > b.r ? -1 : a.r < b.r ? 1 : a.i - b.i));
+    const out = [...floors];
+    let k = 0;
+    while (assigned < total) {
+      out[order[k % order.length].i] += 1n;
+      assigned += 1n;
+      k += 1;
+    }
+    return out;
+  }
   const weightSum = weights.reduce((sum, w) => sum + w, 0);
   if (weightSum <= 0) throw new Error("weights must sum to more than 0");
   const exact = weights.map((w) => (total * w) / weightSum);

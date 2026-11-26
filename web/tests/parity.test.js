@@ -98,6 +98,17 @@ function disputeWithAppealDrawn(court, firstVotes) {
   return { disputeId, panel, appealPanel };
 }
 
+// Settle once the reveal window has passed, as the template requires:
+// the epoch moves to the latest reveal deadline first, the first-round
+// deadline, or the appeal deadline when the dispute is under appeal.
+function settleAtDeadline(court, disputeId) {
+  const dispute = court.dispute(disputeId);
+  let epoch = dispute.revealDeadline;
+  if (dispute.appealed) epoch = Math.max(epoch, dispute.appealRevealDeadline);
+  court.setEpoch(epoch);
+  return court.settle(disputeId);
+}
+
 describe("constants match the template", () => {
   test("panel sizes, fees, bond floor, delay, window, and domains", () => {
     assert.equal(PANEL_SIZE, 3);
@@ -240,6 +251,49 @@ describe("majority rule agrees with the mirror", () => {
       { vote: VOTE_REFUND, count: 4 },
     );
   });
+
+  test("three pay of four revealed on a panel of seven returns no ruling in both", () => {
+    assert.deepEqual(
+      majorityOutcome([VOTE_PAY, VOTE_PAY, VOTE_PAY, VOTE_REFUND], APPEAL_PANEL_SIZE),
+      { vote: null, count: 3 },
+    );
+    const court = makeCourt();
+    const { disputeId, appealPanel } = disputeWithAppealDrawn(court, [
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_REFUND,
+    ]);
+    ruleAppealPanel(court, disputeId, appealPanel.slice(0, 4), [
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_REFUND,
+    ]);
+    assert.throws(() => court.settle(disputeId), /appeal round has no majority ruling/);
+  });
+
+  test("four matching pay votes on a panel of seven rule pay in both", () => {
+    assert.deepEqual(majorityOutcome([VOTE_PAY, VOTE_PAY, VOTE_PAY, VOTE_PAY], APPEAL_PANEL_SIZE), {
+      vote: VOTE_PAY,
+      count: 4,
+    });
+    const court = makeCourt();
+    const { disputeId, appealPanel } = disputeWithAppealDrawn(court, [
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_REFUND,
+    ]);
+    ruleAppealPanel(court, disputeId, appealPanel.slice(0, 4), [
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_PAY,
+    ]);
+    const result = settleAtDeadline(court, disputeId);
+    assert.equal(result.outcome, VOTE_PAY);
+    assert.equal(result.payeeAmount, 490000n);
+    assert.equal(court.escrows.get("escrow-0").vault, 0n);
+  });
 });
 
 describe("settlement matrix", () => {
@@ -248,27 +302,27 @@ describe("settlement matrix", () => {
     const { disputeId, panel } = disputeWithRuling(court, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
     const payerBefore = court.balance("payer");
     const payeeBefore = court.balance("payee");
-    const result = court.settle(disputeId);
+    const result = settleAtDeadline(court, disputeId);
     assert.deepEqual(result, {
       outcome: VOTE_PAY,
-      payeeAmount: 490000,
-      payerAmount: 0,
-      fees: 10000,
-      leftoverAppealFee: 0,
+      payeeAmount: 490000n,
+      payerAmount: 0n,
+      fees: 10000n,
+      leftoverAppealFee: 0n,
     });
     assert.deepEqual(settleAmounts(TOTAL, VOTE_PAY, 2), {
       fees: 10000,
       payeeAmount: 490000,
       payerAmount: 0,
     });
-    assert.equal(court.balance("payee"), payeeBefore + 490000);
+    assert.equal(court.balance("payee"), payeeBefore + 490000n);
     assert.equal(court.balance("payer"), payerBefore);
-    assert.equal(court.dispute(disputeId).escrowId && court.escrows.get("escrow-0").vault, 0);
-    assert.equal(court.disputeClaim(disputeId, panel[0]), 7500);
-    assert.equal(court.disputeClaim(disputeId, panel[1]), 7500);
-    assert.equal(court.disputeClaim(disputeId, panel[2]), 0);
-    assert.equal(court.bonds.get(panel[2]), BOND_FLOOR - JUROR_FEE);
-    assert.equal(490000 + 0 + 10000, TOTAL);
+    assert.equal(court.dispute(disputeId).escrowId && court.escrows.get("escrow-0").vault, 0n);
+    assert.equal(court.disputeClaim(disputeId, panel[0]), 7500n);
+    assert.equal(court.disputeClaim(disputeId, panel[1]), 7500n);
+    assert.equal(court.disputeClaim(disputeId, panel[2]), 0n);
+    assert.equal(court.bonds.get(panel[2]), BigInt(BOND_FLOOR - JUROR_FEE));
+    assert.equal(490000n + 0n + 10000n, BigInt(TOTAL));
   });
 
   test("refund majority: payer 290,000 on a 300,000 principal", () => {
@@ -277,26 +331,26 @@ describe("settlement matrix", () => {
     const payerBefore = court.balance("payer");
     const { panel } = drawAt(court, disputeId);
     rulePanel(court, disputeId, panel, [VOTE_REFUND, VOTE_REFUND, VOTE_PAY]);
-    const result = court.settle(disputeId);
-    assert.equal(result.payeeAmount, 0);
-    assert.equal(result.payerAmount, 290000);
-    assert.equal(result.fees, 10000);
-    assert.equal(court.balance("payer"), payerBefore + 290000);
-    assert.equal(0 + 290000 + 10000, 300000);
+    const result = settleAtDeadline(court, disputeId);
+    assert.equal(result.payeeAmount, 0n);
+    assert.equal(result.payerAmount, 290000n);
+    assert.equal(result.fees, 10000n);
+    assert.equal(court.balance("payer"), payerBefore + 290000n);
+    assert.equal(0n + 290000n + 10000n, 300000n);
   });
 
   test("split even: 245,000 each", () => {
     const court = makeCourt(3);
     const { disputeId } = disputeWithRuling(court, [VOTE_SPLIT, VOTE_SPLIT, VOTE_PAY]);
-    const result = court.settle(disputeId);
+    const result = settleAtDeadline(court, disputeId);
     assert.deepEqual(settleAmounts(TOTAL, VOTE_SPLIT, 2), {
       fees: 10000,
       payeeAmount: 245000,
       payerAmount: 245000,
     });
-    assert.equal(result.payeeAmount, 245000);
-    assert.equal(result.payerAmount, 245000);
-    assert.equal(245000 + 245000 + 10000, TOTAL);
+    assert.equal(result.payeeAmount, 245000n);
+    assert.equal(result.payerAmount, 245000n);
+    assert.equal(245000n + 245000n + 10000n, BigInt(TOTAL));
   });
 
   test("split odd dust: 45,001 to the payee, 45,000 to the payer", () => {
@@ -304,15 +358,15 @@ describe("settlement matrix", () => {
     const disputeId = openFunded(court, 100001);
     const { panel } = drawAt(court, disputeId);
     rulePanel(court, disputeId, panel, [VOTE_SPLIT, VOTE_SPLIT, VOTE_PAY]);
-    const result = court.settle(disputeId);
+    const result = settleAtDeadline(court, disputeId);
     assert.deepEqual(settleAmounts(100001, VOTE_SPLIT, 2), {
       fees: 10000,
       payeeAmount: 45001,
       payerAmount: 45000,
     });
-    assert.equal(result.payeeAmount, 45001);
-    assert.equal(result.payerAmount, 45000);
-    assert.equal(45001 + 45000 + 10000, 100001);
+    assert.equal(result.payeeAmount, 45001n);
+    assert.equal(result.payerAmount, 45000n);
+    assert.equal(45001n + 45000n + 10000n, 100001n);
   });
 
   test("fees are capped at a small principal", () => {
@@ -320,15 +374,15 @@ describe("settlement matrix", () => {
     const disputeId = openFunded(court, 10000);
     const { panel } = drawAt(court, disputeId);
     rulePanel(court, disputeId, panel, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
-    const result = court.settle(disputeId);
+    const result = settleAtDeadline(court, disputeId);
     assert.deepEqual(result, {
       outcome: VOTE_PAY,
-      payeeAmount: 0,
-      payerAmount: 0,
-      fees: 10000,
-      leftoverAppealFee: 0,
+      payeeAmount: 0n,
+      payerAmount: 0n,
+      fees: 10000n,
+      leftoverAppealFee: 0n,
     });
-    assert.equal(0 + 0 + 10000, 10000);
+    assert.equal(0n + 0n + 10000n, 10000n);
   });
 
   test("settle before quorum is rejected", () => {
@@ -342,15 +396,15 @@ describe("settlement matrix", () => {
   test("double settlement is rejected", () => {
     const court = makeCourt(3);
     const { disputeId } = disputeWithRuling(court, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
-    court.settle(disputeId);
+    settleAtDeadline(court, disputeId);
     assert.throws(() => court.settle(disputeId), /dispute already settled/);
   });
 
   test("claim_fee pays the majority once and refuses the minority and a second claim", () => {
     const court = makeCourt(3);
     const { disputeId, panel } = disputeWithRuling(court, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
-    court.settle(disputeId);
-    assert.equal(court.claimFee(disputeId, panel[0]), 7500);
+    settleAtDeadline(court, disputeId);
+    assert.equal(court.claimFee(disputeId, panel[0]), 7500n);
     assert.throws(() => court.claimFee(disputeId, panel[0]), /fee already claimed/);
     assert.throws(() => court.claimFee(disputeId, panel[2]), /no fee claim for this juror/);
   });
@@ -396,10 +450,10 @@ describe("replacement draw", () => {
     const redrawn = court.drawJury(disputeId);
     assert.equal(redrawn.panel.length, 3);
     rulePanel(court, disputeId, redrawn.panel, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
-    court.settle(disputeId);
-    assert.equal(court.disputeClaim(disputeId, redrawn.panel[0]), 10000);
-    assert.equal(court.disputeClaim(disputeId, redrawn.panel[1]), 10000);
-    assert.equal(court.escrows.get("escrow-0").vault, 0);
+    settleAtDeadline(court, disputeId);
+    assert.equal(court.disputeClaim(disputeId, redrawn.panel[0]), 10000n);
+    assert.equal(court.disputeClaim(disputeId, redrawn.panel[1]), 10000n);
+    assert.equal(court.escrows.get("escrow-0").vault, 0n);
   });
 
   test("a second replacement is rejected", () => {
@@ -434,10 +488,13 @@ describe("no-ruling fallback", () => {
     court.setEpoch(court.dispute(disputeId).drawEpoch);
     const redrawn = court.drawJury(disputeId);
     rulePanel(court, disputeId, redrawn.panel.slice(0, 1), [VOTE_REFUND]);
+    // The replacement round must finish first: its window runs to the
+    // new reveal deadline, and only then can the close run.
+    court.setEpoch(court.dispute(disputeId).revealDeadline);
     const result = court.closeNoRuling(disputeId);
-    assert.equal(result.payerAmount, TOTAL);
-    assert.equal(court.balance("payer"), payerBefore + TOTAL);
-    assert.equal(court.escrows.get("escrow-0").vault, 0);
+    assert.equal(result.payerAmount, BigInt(TOTAL));
+    assert.equal(court.balance("payer"), payerBefore + BigInt(TOTAL));
+    assert.equal(court.escrows.get("escrow-0").vault, 0n);
     assert.equal(court.dispute(disputeId).closedNoRuling, true);
     assert.throws(() => court.settle(disputeId), /dispute closed with no ruling/);
   });
@@ -450,9 +507,9 @@ describe("no-ruling fallback", () => {
     assert.throws(() => court.settle(disputeId), /first round has no majority ruling/);
     court.closeNoRuling(disputeId);
     for (const key of panel) {
-      assert.equal(court.bonds.get(key), BOND_FLOOR);
+      assert.equal(court.bonds.get(key), BigInt(BOND_FLOOR));
     }
-    assert.equal(court.balance("payer"), 1000000);
+    assert.equal(court.balance("payer"), 1000000n);
   });
 
   test("close is rejected while the round can still reach a ruling", () => {
@@ -563,12 +620,12 @@ describe("appeal", () => {
     });
     assert.equal(refunds, 4);
     ruleAppealPanel(court, disputeId, appealPanel, appealVotes);
-    const result = court.settle(disputeId);
+    const result = settleAtDeadline(court, disputeId);
     assert.equal(result.outcome, VOTE_REFUND);
-    assert.equal(result.payeeAmount, 0);
+    assert.equal(result.payeeAmount, 0n);
     assert.equal(court.balance("payee"), payeeBefore);
-    assert.equal(court.balance("payer"), payerBefore + 490000 + 15000);
-    assert.equal(court.escrows.get("escrow-0").vault, 0);
+    assert.equal(court.balance("payer"), payerBefore + 490000n + 15000n);
+    assert.equal(court.escrows.get("escrow-0").vault, 0n);
   });
 
   test("appeal guards reject a bad fee, a stranger, and a double appeal", () => {
@@ -592,7 +649,7 @@ describe("appeal", () => {
   test("appeal after settlement is rejected", () => {
     const court = makeCourt();
     const { disputeId } = disputeWithRuling(court, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
-    court.settle(disputeId);
+    settleAtDeadline(court, disputeId);
     assert.throws(
       () => court.openAppeal(disputeId, "payer", APPEAL_FEE, DRAW_DELAY),
       /dispute already settled/,
@@ -654,10 +711,10 @@ describe("appeal", () => {
       VOTE_PAY,
       VOTE_PAY,
     ]);
-    const result = court.settle(disputeId);
+    const result = settleAtDeadline(court, disputeId);
     assert.equal(result.outcome, VOTE_REFUND);
-    assert.equal(result.payeeAmount, 0);
-    assert.equal(court.escrows.get("escrow-0").vault, 0);
+    assert.equal(result.payeeAmount, 0n);
+    assert.equal(court.escrows.get("escrow-0").vault, 0n);
   });
 
   test("appeal with fewer than seven jurors is rejected", () => {
@@ -778,10 +835,10 @@ describe("escrow rules", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
     escrow.freezeForDispute(0);
     assert.throws(() => escrow.withdrawRemainder(), /no ruling has executed/);
-    assert.equal(escrow.executeRuling(0, 490000), 490000);
-    assert.throws(() => escrow.executeRuling(0, 490000), /ruling already executed/);
-    assert.equal(escrow.withdrawRemainder(), 10000);
-    assert.equal(escrow.vault, 0);
+    assert.equal(escrow.executeRuling(0, 490000n), 490000n);
+    assert.throws(() => escrow.executeRuling(0, 490000n), /ruling already executed/);
+    assert.equal(escrow.withdrawRemainder(), 10000n);
+    assert.equal(escrow.vault, 0n);
   });
 
   test("an unfunded escrow cannot freeze for a dispute", () => {
@@ -804,14 +861,242 @@ describe("sample dispute 0 reproduced by the simulation", () => {
     court.setEpoch(DRAW_DELAY);
     const { panel } = court.drawJury(disputeId);
     rulePanel(court, disputeId, panel, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
-    const result = court.settle(disputeId);
+    const result = settleAtDeadline(court, disputeId);
     assert.equal(result.outcome, VOTE_PAY);
-    assert.equal(result.payeeAmount, sample.payeeAmount);
-    assert.equal(result.payerAmount, sample.payerAmount);
-    assert.equal(result.fees, sample.fees);
+    assert.equal(result.payeeAmount, BigInt(sample.payeeAmount));
+    assert.equal(result.payerAmount, BigInt(sample.payerAmount));
+    assert.equal(result.fees, BigInt(sample.fees));
     assert.equal(
       result.payeeAmount + result.payerAmount + result.fees,
-      sample.principal,
+      BigInt(sample.principal),
+    );
+  });
+});
+
+describe("input validation", () => {
+  test("a negative evidence index is rejected", () => {
+    const court = makeCourt(3);
+    const disputeId = openFunded(court);
+    assert.throws(
+      () => court.submitEvidence(disputeId, "payer", 0, -1, sha256Hex("a"), "sample://a"),
+      /evidence index out of range/,
+    );
+    assert.throws(
+      () => court.submitEvidence(disputeId, "payer", 0, 1.5, sha256Hex("a"), "sample://a"),
+      /evidence index out of range/,
+    );
+  });
+
+  test("negative, fractional, and NaN votes are rejected on commit and reveal", () => {
+    const court = makeCourt(3);
+    const disputeId = openFunded(court);
+    const { panel } = drawAt(court, disputeId);
+    for (const bad of [-1, 1.5, Number.NaN, 4]) {
+      assert.throws(
+        () => court.commitVote(disputeId, panel[0], bad, salt(0)),
+        /invalid vote/,
+      );
+    }
+    court.commitVote(disputeId, panel[0], VOTE_PAY, salt(0));
+    for (const bad of [-1, 1.5, Number.NaN, 4]) {
+      assert.throws(
+        () => court.revealVote(disputeId, panel[0], bad, salt(0)),
+        /invalid vote/,
+      );
+    }
+  });
+
+  test("a duplicate escrow id and an invalid principal are rejected", () => {
+    const court = makeCourt(3);
+    court.fund("payer", 1000000);
+    court.createEscrow("escrow-0", "payer", "payee", TOTAL);
+    assert.throws(
+      () => court.createEscrow("escrow-0", "payer", "payee", TOTAL),
+      /escrow already exists/,
+    );
+    for (const [i, bad] of [0, -5, 1.5, Number.NaN].entries()) {
+      assert.throws(
+        () => court.createEscrow(`escrow-bad-${i}`, "payer", "payee", bad),
+        /principal must be more than 0|amount must be a whole number/,
+      );
+    }
+    assert.throws(
+      () => court.createEscrow("escrow-9", "payer", "payer", TOTAL),
+      /payee must differ from the payer/,
+    );
+  });
+});
+
+describe("settlement precision", () => {
+  test("a principal above the safe integer range settles to the micro-Tari", () => {
+    const principal = 9007199254740993n;
+    const court = makeCourt(3);
+    court.fund("payer", principal);
+    court.createEscrow("escrow-0", "payer", "payee", principal);
+    const disputeId = court.openDispute("escrow-0", DRAW_DELAY);
+    const { panel } = drawAt(court, disputeId);
+    rulePanel(court, disputeId, panel, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    const result = settleAtDeadline(court, disputeId);
+    assert.equal(result.fees, 10000n);
+    assert.equal(result.payeeAmount, principal - 10000n);
+    assert.equal(result.payerAmount, 0n);
+    assert.equal(
+      result.payeeAmount + result.payerAmount + result.fees,
+      principal,
+    );
+    assert.equal(court.balance("payee"), principal - 10000n);
+  });
+});
+
+describe("reveal deadline gate on settle", () => {
+  test("settle before the reveal deadline is rejected, at the deadline it runs", () => {
+    const court = makeCourt(3);
+    const { disputeId } = disputeWithRuling(court, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    assert.throws(() => court.settle(disputeId), /reveal window has not passed yet/);
+    const result = settleAtDeadline(court, disputeId);
+    assert.equal(result.outcome, VOTE_PAY);
+    assert.equal(result.payeeAmount, 490000n);
+  });
+});
+
+describe("close after a replacement", () => {
+  test("close is rejected until the replacement round finishes", () => {
+    const court = makeCourt(3);
+    const disputeId = openFunded(court);
+    const { panel } = drawAt(court, disputeId);
+    rulePanel(court, disputeId, panel.slice(0, 1), [VOTE_PAY]);
+    const dispute = court.dispute(disputeId);
+    court.setEpoch(dispute.revealDeadline);
+    court.replaceJury(disputeId, "payer", DRAW_DELAY);
+    assert.throws(
+      () => court.closeNoRuling(disputeId),
+      /jury not drawn for this dispute/,
+    );
+    court.setEpoch(court.dispute(disputeId).drawEpoch);
+    const redrawn = court.drawJury(disputeId);
+    rulePanel(court, disputeId, redrawn.panel.slice(0, 1), [VOTE_REFUND]);
+    assert.throws(
+      () => court.closeNoRuling(disputeId),
+      /first round can still reach a ruling/,
+    );
+    court.setEpoch(court.dispute(disputeId).revealDeadline);
+    const result = court.closeNoRuling(disputeId);
+    assert.equal(result.payerAmount, BigInt(TOTAL));
+    assert.equal(court.dispute(disputeId).closedNoRuling, true);
+  });
+});
+
+describe("refusing juror in the no-ruling close", () => {
+  test("a refusing juror is neither paid nor slashed", () => {
+    const court = makeCourt(3);
+    const disputeId = openFunded(court);
+    const { panel } = drawAt(court, disputeId);
+    rulePanel(court, disputeId, panel.slice(0, 2), [VOTE_REFUSE, VOTE_PAY]);
+    const failedFirst = panel[2];
+    const dispute = court.dispute(disputeId);
+    court.setEpoch(dispute.revealDeadline);
+    court.replaceJury(disputeId, "payer", DRAW_DELAY);
+    court.setEpoch(court.dispute(disputeId).drawEpoch);
+    const redrawn = court.drawJury(disputeId);
+    rulePanel(court, disputeId, redrawn.panel.slice(0, 2), [VOTE_REFUSE, VOTE_PAY]);
+    court.setEpoch(court.dispute(disputeId).revealDeadline);
+    court.closeNoRuling(disputeId);
+    const refuseKey = redrawn.panel[0];
+    const payKey = redrawn.panel[1];
+    const silentKey = redrawn.panel[2];
+    assert.equal(court.disputeClaim(disputeId, refuseKey), 0n);
+    const expectedPay = silentKey === failedFirst ? 5000n : 10000n;
+    assert.equal(court.disputeClaim(disputeId, payKey), expectedPay);
+    const expectedRefuseBond =
+      refuseKey === failedFirst ? BigInt(BOND_FLOOR - JUROR_FEE) : BigInt(BOND_FLOOR);
+    assert.equal(court.bonds.get(refuseKey), expectedRefuseBond);
+    assert.equal(court.bonds.get(failedFirst), BigInt(BOND_FLOOR - JUROR_FEE));
+    assert.equal(court.bonds.get(silentKey), BigInt(BOND_FLOOR - JUROR_FEE));
+  });
+});
+
+describe("failed jurors stay in their own round", () => {
+  test("appeal failed jurors top up the appeal majority only", () => {
+    const court = makeCourt();
+    const { disputeId, panel, appealPanel } = disputeWithAppealDrawn(court, [
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_REFUND,
+    ]);
+    ruleAppealPanel(court, disputeId, appealPanel.slice(0, 6), [
+      VOTE_REFUND,
+      VOTE_REFUND,
+      VOTE_REFUND,
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_PAY,
+    ]);
+    const failedAppeal = appealPanel[6];
+    const dispute = court.dispute(disputeId);
+    court.setEpoch(dispute.appealRevealDeadline);
+    court.replaceAppealJury(disputeId, "payer", DRAW_DELAY);
+    court.setEpoch(court.dispute(disputeId).appealDrawEpoch);
+    const redrawn = court.drawAppealJury(disputeId);
+    const appealVotes = [
+      VOTE_REFUND,
+      VOTE_REFUND,
+      VOTE_REFUND,
+      VOTE_REFUND,
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_PAY,
+    ];
+    ruleAppealPanel(court, disputeId, redrawn.panel, appealVotes);
+    const result = settleAtDeadline(court, disputeId);
+    assert.equal(result.outcome, VOTE_REFUND);
+    // The appeal slash is one fee per juror in the minority plus the one
+    // failed juror, counted once even when the failed juror also voted
+    // with the minority in the second round.
+    const appealSlashKeys = new Set(
+      redrawn.panel.filter((key, i) => appealVotes[i] === VOTE_PAY),
+    );
+    appealSlashKeys.add(failedAppeal);
+    const appealShareEach = 5000n + (BigInt(appealSlashKeys.size * 5000) / 4n);
+    for (const key of court.jurors.keys()) {
+      const firstShare = panel.slice(0, 2).includes(key) ? 7500n : 0n;
+      const appealIndex = redrawn.panel.indexOf(key);
+      const appealShare = appealVotes[appealIndex] === VOTE_REFUND ? appealShareEach : 0n;
+      assert.equal(court.disputeClaim(disputeId, key), firstShare + appealShare);
+    }
+    assert.equal(court.bonds.get(failedAppeal), BigInt(BOND_FLOOR - JUROR_FEE));
+  });
+});
+
+describe("reschedule cap", () => {
+  test("a draw can be rescheduled three times, the fourth is refused", () => {
+    const court = makeCourt(3);
+    const disputeId = openFunded(court);
+    let drawEpoch = court.dispute(disputeId).drawEpoch;
+    for (let expected = 1; expected <= 3; expected += 1) {
+      court.setEpoch(drawEpoch + 1);
+      const next = court.rescheduleDraw(disputeId);
+      assert.equal(court.dispute(disputeId).reschedules, expected);
+      drawEpoch = next;
+    }
+    court.setEpoch(drawEpoch + 1);
+    assert.throws(() => court.rescheduleDraw(disputeId), /draw reschedule limit reached/);
+  });
+
+  test("an appeal draw can be rescheduled three times, the fourth is refused", () => {
+    const court = makeCourt();
+    const { disputeId } = disputeWithRuling(court, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    court.openAppeal(disputeId, "payer", APPEAL_FEE, DRAW_DELAY);
+    let drawEpoch = court.dispute(disputeId).appealDrawEpoch;
+    for (let expected = 1; expected <= 3; expected += 1) {
+      court.setEpoch(drawEpoch + 1);
+      const next = court.rescheduleAppealDraw(disputeId);
+      assert.equal(court.dispute(disputeId).appealReschedules, expected);
+      drawEpoch = next;
+    }
+    court.setEpoch(drawEpoch + 1);
+    assert.throws(
+      () => court.rescheduleAppealDraw(disputeId),
+      /appeal draw reschedule limit reached/,
     );
   });
 });

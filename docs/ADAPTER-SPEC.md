@@ -34,8 +34,9 @@ withdraw_remainder()
   a ruling has executed, and it runs at most once. When the ruling paid
   full balance, the remainder is empty and it returns an empty bucket.
   The court deposits the payee bucket to the payee account and the
-  remainder bucket to the payer account, so the vault is empty when the
-  settlement finishes.
+  remainder bucket to the payer account, both derived by the court from
+  the payer and payee keys the escrow holds, never from an address a
+  caller supplies, so the vault is empty when the settlement finishes.
 
 ## Approval deposits to the payee
 

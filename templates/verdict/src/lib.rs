@@ -33,9 +33,17 @@ mod verdict {
     /// Draw domain folded into the panel derivation. The first round
     /// draws with domain 0 and the appeal with domain 1, so the same
     /// hash, pool, dispute, and round can never produce the same panel
-    /// across the two rounds.
+    /// across the two rounds. The domain is multiplied by a large
+    /// constant before it is added, so a domain step can never match a
+    /// round step: round 1 with domain 0 and round 0 with domain 1
+    /// contribute different values.
     const DRAW_DOMAIN_FIRST: u64 = 0;
     const DRAW_DOMAIN_APPEAL: u64 = 1;
+    const DRAW_DOMAIN_SCALE: u64 = 1_000_000_007;
+    /// Times a missed draw window can be rescheduled, per draw. A draw
+    /// that keeps being missed stops moving after this many reschedules,
+    /// so the bounded exit in the docs holds.
+    const MAX_RESCHEDULES: u64 = 3;
     /// Fee paid to each juror for one dispute, in micro-Tari.
     const JUROR_FEE: u64 = 5_000;
     /// Bond floor: at least twice the largest juror fee times the panel.
@@ -148,9 +156,15 @@ mod verdict {
         /// Times the draw was rescheduled after its locked epoch passed
         /// without a draw.
         pub reschedules: u64,
-        /// Drawn jurors who failed to reveal in a replaced round. They
-        /// are slashed when the dispute settles or closes.
+        /// Drawn jurors who failed to reveal in a replaced first round.
+        /// They are slashed when the dispute settles or closes, and the
+        /// forfeited bonds top up the first-round majority only.
         pub failed_jurors: Vec<RistrettoPublicKeyBytes>,
+        /// Drawn jurors who failed to reveal in a replaced appeal round.
+        /// They are slashed when the dispute settles or closes, and the
+        /// forfeited bonds top up the appeal majority only, never the
+        /// first-round majority.
+        pub appeal_failed_jurors: Vec<RistrettoPublicKeyBytes>,
         /// Fee claims recorded at settle or close, one per juror owed.
         pub claims: Vec<FeeClaim>,
         /// Juror keys eligible for this dispute, in registration order.
@@ -284,6 +298,7 @@ mod verdict {
                 replacement_used: false,
                 reschedules: 0,
                 failed_jurors: Vec::new(),
+                appeal_failed_jurors: Vec::new(),
                 claims: Vec::new(),
                 eligible_pool,
                 panel: Vec::new(),
@@ -394,13 +409,18 @@ mod verdict {
         /// The new draw epoch is the current epoch plus one, never the
         /// current epoch itself, so the rescheduled draw still uses a
         /// future epoch hash. The reschedule is recorded on chain, so
-        /// it cannot happen quietly. Callable as often as the window
-        /// keeps being missed.
+        /// it cannot happen quietly. A draw can be rescheduled at most
+        /// three times: after the third reschedule the draw must execute
+        /// in its locked epoch or the dispute is left to the fallback.
         pub fn reschedule_draw(&mut self, dispute_id: u64) {
             let dispute = self.dispute_mut(dispute_id);
             assert!(!dispute.drawn, "jury already drawn for this dispute");
             assert!(!dispute.settled, "dispute already settled");
             assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
+            assert!(
+                dispute.reschedules < MAX_RESCHEDULES,
+                "draw reschedule limit reached"
+            );
             assert!(
                 Consensus::current_epoch() > dispute.draw_epoch,
                 "draw epoch has not passed yet"
@@ -527,27 +547,30 @@ mod verdict {
             });
         }
 
-        /// Settle a dispute: the ruling is the majority of the revealed
-        /// votes, never a caller-supplied amount. The court reads the
+        /// Settle a dispute: the ruling is the majority of the full
+        /// panel, never a caller-supplied amount. The court reads the
         /// escrow vault balance as the principal, works out the payee
         /// amount from the ruling outcome, orders the ruling, and routes
-        /// both buckets the escrow returns. Jurors are paid first: the
+        /// both buckets the escrow returns. The payout accounts are
+        /// never taken from the caller: the court reads the payer and
+        /// the payee keys from the escrow and derives their accounts
+        /// from those keys, so no caller can redirect the proceeds to
+        /// an account of their own. Jurors are paid first: the
         /// fees owed to the majority jurors are taken from the remainder
         /// bucket into the fee vault before the payer is paid. Costs are
-        /// capped at the principal. Exactly once. When the dispute is
+        /// capped at the principal. Exactly once. Settle runs only once
+        /// the reveal window has passed, for the first round and, when
+        /// the dispute is under appeal, for the appeal round too, so a
+        /// juror who still has time to reveal is never counted among
+        /// the offenders and slashed. When the dispute is
         /// under appeal, the appeal ruling settles it, the appeal jurors
         /// are paid from the appeal fee, and the unspent appeal fee
         /// returns to the appellant. The court never holds the money
         /// beyond the fee vault.
-        pub fn settle(
-            &mut self,
-            dispute_id: u64,
-            payee_account: ComponentAddress,
-            payer_account: ComponentAddress,
-        ) {
+        pub fn settle(&mut self, dispute_id: u64) {
             // Read the ruling and the principal before any state
             // changes, so a failed settle leaves the dispute untouched.
-            let (escrow, outcome, first_outcome, principal) = {
+            let (escrow, outcome, first_outcome, principal, payer_key, payee_key) = {
                 let dispute = self.dispute(dispute_id);
                 assert!(!dispute.settled, "dispute already settled");
                 assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
@@ -563,16 +586,45 @@ mod verdict {
                 } else {
                     first_outcome
                 };
+                // The reveal window must have passed before anyone can
+                // be slashed for not revealing: a juror inside their
+                // window is not an offender.
+                assert!(
+                    Consensus::current_epoch() >= dispute.reveal_deadline,
+                    "reveal window has not passed yet"
+                );
+                if dispute.appealed {
+                    assert!(
+                        Consensus::current_epoch() >= dispute.appeal_reveal_deadline,
+                        "appeal reveal window has not passed yet"
+                    );
+                }
                 let escrow = dispute.escrow;
                 let principal: u64 = ComponentManager::get(escrow).call("vault_balance", args![]);
-                (escrow, outcome, first_outcome, principal)
+                let payer_key: RistrettoPublicKeyBytes =
+                    ComponentManager::get(escrow).call("payer", args![]);
+                let payee_key: RistrettoPublicKeyBytes =
+                    ComponentManager::get(escrow).call("payee", args![]);
+                (
+                    escrow,
+                    outcome,
+                    first_outcome,
+                    principal,
+                    payer_key,
+                    payee_key,
+                )
             };
+            // The payout accounts come from the escrow, never from the
+            // caller, so the proceeds can only land with the parties to
+            // the deal.
+            let payee_account = Self::account_address(payee_key);
+            let payer_account = Self::account_address(payer_key);
             // Fees owed from the principal: one juror fee per juror in
             // the first-round majority, capped at the principal. When
             // the dispute is under appeal, the appeal jurors are paid
             // from the appeal fee instead, so the principal funds only
             // the first-round majority.
-            let (panel, reveals, appeal_panel, appeal_reveals, failed_jurors) = {
+            let (panel, reveals, appeal_panel, appeal_reveals, failed_jurors, appeal_failed_jurors) = {
                 let dispute = self.dispute(dispute_id);
                 (
                     dispute.panel.clone(),
@@ -594,6 +646,7 @@ mod verdict {
                         })
                         .collect::<Vec<VoteReveal>>(),
                     dispute.failed_jurors.clone(),
+                    dispute.appeal_failed_jurors.clone(),
                 )
             };
             let first_majority_keys = Self::majority_keys(&panel, &reveals, first_outcome);
@@ -685,7 +738,13 @@ mod verdict {
             let first_slash = self.slash_keys(&first_slash_keys);
             let leftover_appeal_fee = if appealed {
                 let appeal_offenders = Self::offenders(&appeal_panel, &appeal_reveals, outcome);
-                let appeal_slash = self.slash_keys(&appeal_offenders);
+                let mut appeal_slash_keys = appeal_offenders;
+                for key in appeal_failed_jurors {
+                    if !appeal_slash_keys.contains(&key) {
+                        appeal_slash_keys.push(key);
+                    }
+                }
+                let appeal_slash = self.slash_keys(&appeal_slash_keys);
                 let appeal_majority_keys =
                     Self::majority_keys(&appeal_panel, &appeal_reveals, outcome);
                 let appeal_fee_total = (appeal_majority_keys.len() as u64)
@@ -840,13 +899,18 @@ mod verdict {
         /// Reschedule a missed appeal draw past the current epoch,
         /// recorded on chain like the first-round reschedule. The new
         /// appeal draw epoch is the current epoch plus one, never the
-        /// current epoch itself.
+        /// current epoch itself. An appeal draw can be rescheduled at
+        /// most three times, the same cap as the first-round draw.
         pub fn reschedule_appeal_draw(&mut self, dispute_id: u64) {
             let dispute = self.dispute_mut(dispute_id);
             assert!(dispute.appealed, "no appeal opened for this dispute");
             assert!(!dispute.appeal_drawn, "appeal jury already drawn");
             assert!(!dispute.settled, "dispute already settled");
             assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
+            assert!(
+                dispute.appeal_reschedules < MAX_RESCHEDULES,
+                "appeal draw reschedule limit reached"
+            );
             assert!(
                 Consensus::current_epoch() > dispute.appeal_draw_epoch,
                 "appeal draw epoch has not passed yet"
@@ -958,9 +1022,9 @@ mod verdict {
             let dispute = self.dispute_mut(dispute_id);
             for juror in dispute.appeal_panel.clone() {
                 if !dispute.appeal_reveals.iter().any(|r| r.juror == juror)
-                    && !dispute.failed_jurors.contains(&juror)
+                    && !dispute.appeal_failed_jurors.contains(&juror)
                 {
-                    dispute.failed_jurors.push(juror);
+                    dispute.appeal_failed_jurors.push(juror);
                 }
             }
             dispute.appeal_draw_epoch = now
@@ -979,22 +1043,25 @@ mod verdict {
         }
 
         /// Close a dispute with no ruling, the bounded exit of the
-        /// ladder. Allowed only when no ruling can be reached: either
-        /// the replacement draw has been used and the new round still
-        /// has no majority, or a round is fully revealed with no
-        /// majority, including an appeal round. The ruling executes with
-        /// a payee amount of 0, which unfreezes the escrow, and the
-        /// whole principal returns to the payer: the opener's fee is
-        /// refunded in full, no juror fee is taken. Jurors who were
-        /// drawn and did not reveal are slashed, and the forfeited
-        /// bonds go to the jurors who did reveal. An unspent appeal fee
-        /// returns to the appellant in full.
-        pub fn close_no_ruling(
-            &mut self,
-            dispute_id: u64,
-            payee_account: ComponentAddress,
-            payer_account: ComponentAddress,
-        ) {
+        /// ladder. Allowed only when no ruling can be reached: a round
+        /// is finished when it is fully revealed, and a replacement
+        /// round is also finished once its own reveal window has
+        /// passed with no majority, so a replacement round always gets
+        /// its full window to vote before the close can run, and a
+        /// round that stalls after its replacement still exits. The
+        /// ruling executes with a payee amount of 0, which unfreezes
+        /// the escrow, and the whole principal returns to the payer:
+        /// the opener's fee is refunded in full, no juror fee is taken.
+        /// The payer account is read from the escrow, never taken from
+        /// the caller, so no caller can redirect the principal.
+        /// Jurors who were drawn and did not reveal are slashed, and
+        /// the forfeited bonds go to the jurors who did reveal, other
+        /// than jurors who voted to refuse: a refusing juror is neither
+        /// paid nor slashed. When nobody who revealed is payable,
+        /// nobody is slashed: there is no one to pay, and the court
+        /// keeps nothing. An unspent appeal fee returns to the
+        /// appellant in full.
+        pub fn close_no_ruling(&mut self, dispute_id: u64) {
             let escrow = {
                 let dispute = self.dispute(dispute_id);
                 assert!(!dispute.settled, "dispute already settled");
@@ -1003,10 +1070,19 @@ mod verdict {
                     "dispute already closed with no ruling"
                 );
                 assert!(dispute.drawn, "jury not drawn for this dispute");
-                let round_done = dispute.reveals.len() == dispute.panel.len();
-                let appeal_done = dispute.appealed
-                    && dispute.appeal_drawn
-                    && dispute.appeal_reveals.len() == dispute.appeal_panel.len();
+                // A round is finished when it is fully revealed. A
+                // replacement round is also finished once its own
+                // reveal window has passed with no majority: the new
+                // jurors have had their full window, and the dispute
+                // still exits instead of staying frozen.
+                let round_finished = dispute.drawn
+                    && (dispute.reveals.len() == dispute.panel.len()
+                        || (dispute.replacement_used
+                            && Consensus::current_epoch() >= dispute.reveal_deadline));
+                let appeal_finished = dispute.appeal_drawn
+                    && (dispute.appeal_reveals.len() == dispute.appeal_panel.len()
+                        || (dispute.appeal_replacement_used
+                            && Consensus::current_epoch() >= dispute.appeal_reveal_deadline));
                 let first_no_majority =
                     Self::majority_outcome(&dispute.reveals, dispute.panel.len() as u64).is_none();
                 let appeal_no_majority = Self::majority_outcome(
@@ -1019,12 +1095,12 @@ mod verdict {
                     // appeal exists. Only the appeal round can still
                     // reach a ruling, so only it gates the close.
                     assert!(
-                        appeal_no_majority && (dispute.appeal_replacement_used || appeal_done),
+                        appeal_no_majority && appeal_finished,
                         "appeal round can still reach a ruling"
                     );
                 } else {
                     assert!(
-                        first_no_majority && (dispute.replacement_used || round_done),
+                        first_no_majority && round_finished,
                         "first round can still reach a ruling"
                     );
                 }
@@ -1051,15 +1127,22 @@ mod verdict {
                 remainder_moved, principal,
                 "no-ruling remainder must be the whole principal"
             );
+            // The whole principal returns to the payer named by the
+            // escrow, never to an account the caller supplies.
+            let payer_key: RistrettoPublicKeyBytes =
+                ComponentManager::get(escrow).call("payer", args![]);
+            let payer_account = Self::account_address(payer_key);
             if remainder_moved > 0 {
                 ComponentManager::get(payer_account).invoke("deposit", args![remainder_bucket]);
             }
-            let _ = payee_account;
             // Slash the jurors who did not reveal, and pay the forfeited
-            // bonds to the jurors who did. When nobody revealed, nobody
-            // is slashed: there is no one to pay, and the court keeps
-            // nothing.
-            let (ruling_panel, ruling_reveals, failed_jurors) = {
+            // bonds to the jurors who did reveal, other than jurors who
+            // voted to refuse: a refusing juror is neither paid nor
+            // slashed. When nobody who revealed is payable, nobody is
+            // slashed: there is no one to pay, and the court keeps
+            // nothing. Failed jurors are kept per round, so an appeal
+            // close slashes appeal failures only.
+            let (ruling_panel, revealed_keys, payable_keys, failed_jurors) = {
                 let dispute = self.dispute(dispute_id);
                 if dispute.appealed {
                     (
@@ -1069,7 +1152,13 @@ mod verdict {
                             .iter()
                             .map(|r| r.juror)
                             .collect::<Vec<RistrettoPublicKeyBytes>>(),
-                        dispute.failed_jurors.clone(),
+                        dispute
+                            .appeal_reveals
+                            .iter()
+                            .filter(|r| r.vote != VOTE_REFUSE)
+                            .map(|r| r.juror)
+                            .collect::<Vec<RistrettoPublicKeyBytes>>(),
+                        dispute.appeal_failed_jurors.clone(),
                     )
                 } else {
                     (
@@ -1079,16 +1168,22 @@ mod verdict {
                             .iter()
                             .map(|r| r.juror)
                             .collect::<Vec<RistrettoPublicKeyBytes>>(),
+                        dispute
+                            .reveals
+                            .iter()
+                            .filter(|r| r.vote != VOTE_REFUSE)
+                            .map(|r| r.juror)
+                            .collect::<Vec<RistrettoPublicKeyBytes>>(),
                         dispute.failed_jurors.clone(),
                     )
                 }
             };
-            let slash_total = if ruling_reveals.is_empty() {
+            let slash_total = if payable_keys.is_empty() {
                 0
             } else {
                 let mut slash_keys_list: Vec<RistrettoPublicKeyBytes> = ruling_panel
                     .iter()
-                    .filter(|key| !ruling_reveals.contains(key))
+                    .filter(|key| !revealed_keys.contains(key))
                     .cloned()
                     .collect();
                 for key in failed_jurors {
@@ -1098,14 +1193,14 @@ mod verdict {
                 }
                 self.slash_keys(&slash_keys_list)
             };
-            if !ruling_reveals.is_empty() && slash_total > 0 {
+            if !payable_keys.is_empty() && slash_total > 0 {
                 let dispute = self.dispute_mut(dispute_id);
-                for (i, share) in Self::distribute(slash_total, ruling_reveals.len() as u64)
+                for (i, share) in Self::distribute(slash_total, payable_keys.len() as u64)
                     .into_iter()
                     .enumerate()
                 {
                     if share > 0 {
-                        Self::add_claim(dispute, ruling_reveals[i], share);
+                        Self::add_claim(dispute, payable_keys[i], share);
                     }
                 }
             }
@@ -1424,8 +1519,8 @@ mod verdict {
         }
 
         /// The majority outcome of a round, if one exists: one of pay,
-        /// refund, or split holding a strict majority of the revealed
-        /// votes, with at least a majority of the panel revealed.
+        /// refund, or split holding a strict majority of the full panel,
+        /// with at least a majority of the panel revealed first.
         /// Refuse votes never produce an outcome.
         fn majority_outcome(reveals: &[VoteReveal], panel_len: u64) -> Option<u64> {
             let quorum = panel_len / 2 + 1;
@@ -1434,7 +1529,7 @@ mod verdict {
             }
             for outcome in [VOTE_PAY, VOTE_REFUND, VOTE_SPLIT] {
                 let count = Self::majority_count(reveals, outcome);
-                if count * 2 > reveals.len() as u64 {
+                if count * 2 > panel_len {
                     return Some(outcome);
                 }
             }
@@ -1584,13 +1679,15 @@ mod verdict {
         /// Derive the panel from the drawn hash, the dispute id, the draw
         /// round, the draw domain, and the frozen eligible pool. The
         /// domain separates the first round (0) from the appeal (1):
-        /// the same hash, pool, dispute, and round never produce the
-        /// same panel across the two rounds. For each slot, read an
-        /// 8-byte window of the hash, fold in the dispute id, the round,
-        /// the domain, and the slot, and take the result modulo the pool
-        /// size, probing forward until an unpicked juror is found.
-        /// Returns at most `target_size` jurors, fewer when the pool is
-        /// smaller.
+        /// the domain is multiplied by a large constant before it is
+        /// added, so the same hash, pool, dispute, and round never
+        /// produce the same panel across the two rounds: a domain step
+        /// moves the sum far more than any round step can. For each
+        /// slot, read an 8-byte window of the hash, fold in the dispute
+        /// id, the round, the domain, and the slot, and take the result
+        /// modulo the pool size, probing forward until an unpicked
+        /// juror is found. Returns at most `target_size` jurors, fewer
+        /// when the pool is smaller.
         fn derive_panel(
             pool: &[RistrettoPublicKeyBytes],
             draw_hash: Hash32,
@@ -1616,7 +1713,7 @@ mod verdict {
                 let mut candidate = (value
                     .wrapping_add(dispute_id)
                     .wrapping_add(round)
-                    .wrapping_add(domain)
+                    .wrapping_add(domain.wrapping_mul(DRAW_DOMAIN_SCALE))
                     .wrapping_add(slot))
                     % pool_len;
                 while panel.contains(&pool[candidate as usize]) {
@@ -1625,6 +1722,37 @@ mod verdict {
                 panel.push(pool[candidate as usize]);
             }
             panel
+        }
+
+        /// The account address of a public key, derived the same way
+        /// the engine derives an account created for that key: the
+        /// Blake2b-256 hash, under the engine component-address domain,
+        /// of the account template address (all bytes) and the key.
+        /// The engine hashes the template address and the key in their
+        /// Borsh form, so the key carries its 4-byte little-endian
+        /// length prefix. Settle and the no-ruling close derive the
+        /// payer and payee accounts from the escrow keys with this
+        /// function, so the payout accounts are never caller-supplied.
+        fn account_address(key: RistrettoPublicKeyBytes) -> ComponentAddress {
+            // Domain tag: the 8-byte little-endian length 41, then
+            // "com.tari.ootle.engine", ".v", "0", ".", "ComponentAddress".
+            const DOMAIN_TAG: &[u8] =
+                b"\x29\x00\x00\x00\x00\x00\x00\x00com.tari.ootle.engine.v0.ComponentAddress";
+            let hash = intrinsics::hash_blake2b_parts(&[
+                DOMAIN_TAG,
+                &[0u8; 32],
+                &32u32.to_le_bytes(),
+                key.as_ref(),
+            ]);
+            ComponentAddress::new(tari_template_lib::types::ObjectKey::from_array(
+                hash.leading_bytes::<32>(),
+            ))
+        }
+
+        /// The account address derived from a public key, published so
+        /// an external verifier can check where a settlement pays.
+        pub fn account_address_for_key(&self, key: RistrettoPublicKeyBytes) -> ComponentAddress {
+            Self::account_address(key)
         }
     }
 }

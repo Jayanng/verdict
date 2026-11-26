@@ -47,7 +47,17 @@ caller-component rule plus the in-method assert plus `OwnerRule::None`. The
 shared rules live in `src/verdict.js` and are imported by both the page and
 the tests. The mirror covers the settlement matrix, the quorum rule, the
 refuse exclusion, the fee deduction before the split, the appeal rules, and
-the replacement and fallback rules.
+the replacement and fallback rules. Settlement amounts are BigInt end to end
+in the simulation, so amounts above the safe integer range keep every
+micro-Tari, and `settle` and the no-ruling close take no payout accounts
+from the caller: the court derives the payer and payee accounts from the
+escrow, as the template does.
+
+Two points the simulation mirrors from the template on purpose, so they are
+not defects: the template has no epoch check on commit or reveal, so the
+simulation has none either, and the template freezes the escrow before the
+pool-size check, so the simulation does the same. Changing either would be a
+template design change, not a simulation fix.
 
 ## Sample data
 
@@ -66,9 +76,9 @@ No key is a real person, no hash is on chain, and no amount moved.
 ## Tests
 
 ```sh
-npm test             # node --test tests/verdict.test.js, 27 tests
-npm run test:parity  # node --test tests/parity.test.js, 46 tests
-npm run test:all     # both suites, 73 tests
+npm test             # node --test tests/verdict.test.js, 32 tests
+npm run test:parity  # node --test tests/parity.test.js, 58 tests
+npm run test:all     # both suites, 90 tests
 ```
 
 The mirror suite checks the panel derivation, the vote commitment bytes, the
