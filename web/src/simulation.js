@@ -30,6 +30,7 @@ import {
   majorityOutcome,
   settleAmounts,
   splitLargestRemainder,
+  hexToBytes,
   sha256Hex,
   voteCommitmentBytes,
 } from "./verdict.js";
@@ -66,10 +67,14 @@ function validVote(vote) {
   }
 }
 
-// A draw delay must be a whole number of epochs, at least the minimum:
-// a fractional delay would produce a draw epoch that cannot exist.
+// A draw delay must be a safe whole number of epochs, at least the
+// minimum: a fractional delay would produce a draw epoch that cannot
+// exist, and a delay above the safe integer range would round on
+// addition, so distinct epochs could collapse into one.
 function validDelay(delay) {
-  if (!Number.isInteger(delay)) fail("draw delay must be a whole number of epochs");
+  if (!Number.isSafeInteger(delay)) {
+    fail("draw delay must be a whole number of epochs within the safe integer range");
+  }
   if (delay < MIN_DRAW_DELAY) fail("draw delay must be at least one epoch");
 }
 
@@ -105,12 +110,26 @@ export class SimEscrow {
     this.disputeId = disputeId;
   }
 
-  executeRuling(disputeId, outcome, amounts, caller = this.courtId) {
+  // The caller must be passed explicitly: there is no default, so
+  // omitting it refuses the call instead of authenticating as the
+  // court. Only the court identity may execute a ruling.
+  executeRuling(disputeId, outcome, amounts, caller) {
     if (caller !== this.courtId) fail("only the court can execute a ruling");
     if (this.rulingExecuted) fail("ruling already executed");
     if (!this.frozen || this.disputeId !== disputeId) fail("escrow not frozen for this dispute");
     if (outcome !== VOTE_PAY && outcome !== VOTE_REFUND && outcome !== VOTE_SPLIT && outcome !== NO_OUTCOME) {
       fail("invalid ruling outcome");
+    }
+    if (!Array.isArray(amounts) || amounts.length !== 2) {
+      fail("ruling amounts must be a pair of amounts");
+    }
+    for (const value of amounts) {
+      const isWhole =
+        (typeof value === "bigint" && value >= 0n) ||
+        (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+      if (!isWhole) {
+        fail("ruling amounts must be whole numbers of micro-Tari");
+      }
     }
     const [payeeAmount, payerAmount] = amounts.map((value) => amount(value));
     if (outcome === VOTE_REFUND && payeeAmount !== 0n) {
@@ -156,13 +175,18 @@ export class SimCourt {
   }
 
   setEpoch(epoch) {
-    if (!Number.isInteger(epoch) || epoch < 0) {
-      fail("epoch must be a non-negative whole number");
+    if (!Number.isSafeInteger(epoch) || epoch < 0) {
+      fail("epoch must be a non-negative whole number within the safe integer range");
     }
     this.epoch = epoch;
   }
 
   setEpochHash(epoch, hashHex) {
+    if (!Number.isSafeInteger(epoch) || epoch < 0) {
+      fail("epoch must be a non-negative whole number within the safe integer range");
+    }
+    const hashBytes = hexToBytes(hashHex);
+    if (hashBytes.length !== 32) fail("epoch hash must be 32 bytes of hex");
     this.epochHashes.set(epoch, hashHex);
   }
 
@@ -690,7 +714,22 @@ export class SimCourt {
     return dispute.appealDrawEpoch;
   }
 
+  // The no-ruling close is atomic, the same way settlement is: every
+  // precondition is checked and every amount computed before state
+  // moves, and if anything still fails, the whole call rolls back to
+  // the snapshot taken on entry, so a failing close leaves the
+  // simulation exactly as it was.
   closeNoRuling(disputeId) {
+    const snapshot = this.snapshotState();
+    try {
+      return this.closeNoRulingInner(disputeId);
+    } catch (err) {
+      this.restoreState(snapshot);
+      throw err;
+    }
+  }
+
+  closeNoRulingInner(disputeId) {
     const dispute = this.dispute(disputeId);
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute already closed with no ruling");

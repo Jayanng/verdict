@@ -165,7 +165,10 @@ describe("panel derivation agrees with the mirror", () => {
     assert.deepEqual(panel, expected);
   });
 
-  test("appeal panel differs from the first round with the same hash", () => {
+  // This test proves only that these two draws differ, not that
+  // collisions are impossible: the derivation makes no promise that
+  // two draws produce different panels.
+  test("the appeal panel and the first round panel differ for the two draws in this test", () => {
     const court = makeCourt();
     const disputeId = openFunded(court);
     const hash = sha256Hex("parity-same-hash");
@@ -849,9 +852,12 @@ describe("escrow rules", () => {
   test("a ruling executes at most once and returns both buckets in one call", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
     escrow.freezeForDispute(0);
-    assert.deepEqual(escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n]), [490000n, 10000n]);
+    assert.deepEqual(
+      escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n], COURT_ID),
+      [490000n, 10000n],
+    );
     assert.throws(
-      () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n]),
+      () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n], COURT_ID),
       /ruling already executed/,
     );
     assert.equal(escrow.vault, 0n);
@@ -861,7 +867,7 @@ describe("escrow rules", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
     escrow.freezeForDispute(0);
     assert.throws(
-      () => escrow.executeRuling(0, VOTE_PAY, [490000n, 9999n]),
+      () => escrow.executeRuling(0, VOTE_PAY, [490000n, 9999n], COURT_ID),
       /must equal the vault balance/,
     );
     assert.equal(escrow.vault, BigInt(TOTAL));
@@ -872,7 +878,7 @@ describe("escrow rules", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
     escrow.freezeForDispute(0);
     assert.throws(
-      () => escrow.executeRuling(0, VOTE_REFUND, [1n, 499999n]),
+      () => escrow.executeRuling(0, VOTE_REFUND, [1n, 499999n], COURT_ID),
       /refund pays the payee nothing/,
     );
     assert.equal(escrow.vault, BigInt(TOTAL));
@@ -883,7 +889,7 @@ describe("escrow rules", () => {
     const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
     escrow.freezeForDispute(0);
     assert.throws(
-      () => escrow.executeRuling(0, 3, [490000n, 10000n]),
+      () => escrow.executeRuling(0, 3, [490000n, 10000n], COURT_ID),
       /invalid ruling outcome/,
     );
     assert.equal(escrow.vault, BigInt(TOTAL));
@@ -899,10 +905,32 @@ describe("escrow rules", () => {
     for (const [i, cell] of cells.entries()) {
       const escrow = new SimEscrow(`escrow-cell-${i}`, "payer", "payee", TOTAL);
       escrow.freezeForDispute(0);
-      assert.deepEqual(escrow.executeRuling(0, cell.outcome, cell.amounts), cell.amounts);
+      assert.deepEqual(
+        escrow.executeRuling(0, cell.outcome, cell.amounts, COURT_ID),
+        cell.amounts,
+      );
       assert.equal(escrow.vault, 0n);
       assert.equal(cell.amounts[0] + cell.amounts[1], BigInt(TOTAL));
     }
+  });
+
+  test("ruling amounts must be a pair of whole amounts", () => {
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    escrow.freezeForDispute(0);
+    assert.throws(
+      () => escrow.executeRuling(0, VOTE_PAY, 490000n, COURT_ID),
+      /ruling amounts must be a pair of amounts/,
+    );
+    assert.throws(
+      () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n, 0n], COURT_ID),
+      /ruling amounts must be a pair of amounts/,
+    );
+    assert.throws(
+      () => escrow.executeRuling(0, VOTE_PAY, [490000n, -10000n], COURT_ID),
+      /ruling amounts must be whole numbers of micro-Tari/,
+    );
+    assert.equal(escrow.vault, BigInt(TOTAL));
+    assert.equal(escrow.rulingExecuted, false);
   });
 
   test("a settled dispute pays the payee and the payer and nobody else", () => {
@@ -1197,6 +1225,17 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
     assert.equal(escrow.vault, 0n);
   });
 
+  test("omitting the caller is rejected", () => {
+    const escrow = new SimEscrow("escrow-1", "payer", "payee", TOTAL);
+    escrow.freezeForDispute(0);
+    assert.throws(
+      () => escrow.executeRuling(0, VOTE_PAY, [490000n, 10000n]),
+      /only the court can execute a ruling/,
+    );
+    assert.equal(escrow.vault, BigInt(TOTAL));
+    assert.equal(escrow.rulingExecuted, false);
+  });
+
   test("a fractional draw delay is refused in all four delay methods", () => {
     const court = makeCourt();
     court.fund("payer", 1000000);
@@ -1236,6 +1275,49 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
     assert.equal(court.epoch, 3);
   });
 
+  test("unsafe integer delays and epochs are refused", () => {
+    const court = new SimCourt();
+    assert.throws(() => court.setEpoch(2 ** 53), /epoch must be a non-negative whole number/);
+    court.setEpoch(Number.MAX_SAFE_INTEGER);
+    assert.equal(court.epoch, Number.MAX_SAFE_INTEGER);
+    const open = makeCourt();
+    open.fund("payer", 1000000);
+    open.createEscrow("escrow-0", "payer", "payee", TOTAL);
+    assert.throws(
+      () => open.openDispute("escrow-0", 2 ** 53),
+      /delay must be a whole number/,
+    );
+    const disputeId = open.openDispute("escrow-0", DRAW_DELAY);
+    const { panel } = drawAt(open, disputeId);
+    rulePanel(open, disputeId, panel, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    assert.throws(
+      () => open.replaceJury(disputeId, "payer", 2 ** 53),
+      /delay must be a whole number/,
+    );
+    assert.throws(
+      () => open.openAppeal(disputeId, "payer", APPEAL_FEE, 2 ** 53),
+      /delay must be a whole number/,
+    );
+  });
+
+  test("setEpochHash refuses a bad epoch and a bad hash", () => {
+    const court = new SimCourt();
+    const hash = sha256Hex("epoch-hash-check");
+    assert.throws(
+      () => court.setEpochHash(-1, hash),
+      /epoch must be a non-negative whole number/,
+    );
+    assert.throws(
+      () => court.setEpochHash(2 ** 53, hash),
+      /epoch must be a non-negative whole number/,
+    );
+    assert.throws(() => court.setEpochHash(0, "zzzz"), /hex string must contain only hex/);
+    assert.throws(() => court.setEpochHash(0, "abcd"), /epoch hash must be 32 bytes of hex/);
+    assert.throws(() => court.setEpochHash(0, 42), /hex string must be a string/);
+    court.setEpochHash(0, hash);
+    assert.equal(court.epochHash(0), hash);
+  });
+
   test("a failed opening leaves the escrow unfrozen", () => {
     const court = new SimCourt();
     court.fund("payer", 1000000);
@@ -1262,6 +1344,35 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
     assert.equal(court.balance("payer"), payerBefore);
     assert.equal(court.balance("payee"), payeeBefore);
     panel.forEach((key, i) => assert.equal(court.bonds.get(key), bondsBefore[i]));
+  });
+
+  test("a failing close leaves the simulation unchanged", () => {
+    const court = makeCourt(3);
+    const disputeId = openFunded(court);
+    const { panel } = drawAt(court, disputeId);
+    rulePanel(court, disputeId, panel.slice(0, 1), [VOTE_PAY]);
+    const dispute = court.dispute(disputeId);
+    court.setEpoch(dispute.revealDeadline);
+    court.replaceJury(disputeId, "payer", DRAW_DELAY);
+    court.setEpoch(court.dispute(disputeId).drawEpoch);
+    const redrawn = court.drawJury(disputeId);
+    rulePanel(court, disputeId, redrawn.panel.slice(0, 1), [VOTE_PAY]);
+    court.setEpoch(court.dispute(disputeId).revealDeadline);
+    const escrow = court.escrows.get("escrow-0");
+    const payerBefore = court.balance("payer");
+    const feeVaultBefore = court.feeVault;
+    const bondsBefore = redrawn.panel.map((key) => court.bonds.get(key));
+    // Break the claim step, which runs after the escrow is emptied and
+    // the bonds are slashed, so the rollback has real work to undo.
+    court.dispute(disputeId).claims = null;
+    assert.throws(() => court.closeNoRuling(disputeId));
+    assert.equal(escrow.vault, BigInt(TOTAL));
+    assert.equal(escrow.rulingExecuted, false);
+    assert.equal(escrow.frozen, true);
+    assert.equal(court.dispute(disputeId).closedNoRuling, false);
+    assert.equal(court.balance("payer"), payerBefore);
+    assert.equal(court.feeVault, feeVaultBefore);
+    redrawn.panel.forEach((key, i) => assert.equal(court.bonds.get(key), bondsBefore[i]));
   });
 
   test("a close with an appeal needs the first round finished too", () => {
