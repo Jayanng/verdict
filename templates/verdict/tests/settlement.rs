@@ -1451,7 +1451,7 @@ fn appeal_reveal_deadline(setup: &mut Setup, dispute_id: u64) -> u64 {
 }
 
 #[test]
-fn open_dispute_zero_delay_rejected() {
+fn open_dispute_no_delay_rejected() {
     let mut setup = make_setup();
     fund(&mut setup, TOTAL);
     let _jurors = register_jurors(&mut setup, 3);
@@ -1469,7 +1469,7 @@ fn open_dispute_zero_delay_rejected() {
 }
 
 #[test]
-fn replace_jury_zero_delay_rejected() {
+fn replace_jury_no_delay_rejected() {
     let mut setup = make_setup();
     fund(&mut setup, TOTAL);
     let jurors = register_jurors(&mut setup, 3);
@@ -1493,7 +1493,7 @@ fn replace_jury_zero_delay_rejected() {
 }
 
 #[test]
-fn open_appeal_zero_delay_rejected() {
+fn open_appeal_no_delay_rejected() {
     let mut setup = make_setup();
     fund(&mut setup, TOTAL);
     let jurors = register_jurors(&mut setup, 7);
@@ -1521,7 +1521,7 @@ fn open_appeal_zero_delay_rejected() {
 }
 
 #[test]
-fn replace_appeal_jury_zero_delay_rejected() {
+fn replace_appeal_jury_no_delay_rejected() {
     let mut setup = make_setup();
     fund(&mut setup, TOTAL);
     let jurors = register_jurors(&mut setup, 7);
