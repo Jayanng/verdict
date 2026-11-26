@@ -29,7 +29,7 @@
 //     even when the access rule would allow the call.
 //
 // Deadline semantics, by method. The deadline is an epoch, set at creation,
-// and must be after the creation epoch. Only refund is deadline-gated in
+// and must be after the creation epoch. Only refund is deadline-limited in
 // the sense that it requires the deadline to have passed; every other
 // party method works before the deadline and stops working after it, so
 // the deadline is the point where the deal stops moving forward and the

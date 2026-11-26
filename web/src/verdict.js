@@ -16,9 +16,6 @@ export const MIN_DRAW_DELAY = 1;
 export const REVEAL_WINDOW = 2;
 export const DRAW_DOMAIN_FIRST = 0;
 export const DRAW_DOMAIN_APPEAL = 1;
-// The domain is multiplied by this before it is added to the panel
-// derivation, so a domain step can never match a round step.
-export const DRAW_DOMAIN_SCALE = 1000000007;
 // Times a missed draw window can be rescheduled, per draw.
 export const MAX_RESCHEDULES = 3;
 
@@ -154,13 +151,14 @@ export function voteCommitmentBytes(vote, saltHex, disputeId, jurorHex) {
 }
 
 // The panel derivation, exactly as the template derives it. For each slot,
-// read an 8-byte window of the draw hash, fold in the dispute id, the round,
-// the draw domain multiplied by DRAW_DOMAIN_SCALE, and the slot, take the
-// result modulo the pool size, and probe forward until an unpicked juror is
-// found. Returns the panel as pool indices, in order. Arithmetic is BigInt
-// so the 64-bit wrapping add matches the template. The domain is 0 for a
-// first round and 1 for an appeal, so the two rounds never draw the same
-// panel from the same hash. The pool must already hold a full panel, or the
+// hash the draw hash together with the domain, the round, the dispute id,
+// and the slot, and take the first eight bytes of the digest modulo the
+// pool size, probing forward until an unpicked juror is found. The domain
+// is a separate hash input, so each round's panel is derived independently
+// of the other round's. The derivation makes no promise that two draws
+// produce different panels: panels drawn from different domains are
+// independent draws, and may still match by chance. Returns the panel as
+// pool indices, in order. The pool must already hold a full panel, or the
 // draw is refused.
 export function derivePanel(pool, drawHashHex, disputeId, round, domain = DRAW_DOMAIN_FIRST, size = PANEL_SIZE) {
   const hashBytes = hexToBytes(drawHashHex);
@@ -168,22 +166,21 @@ export function derivePanel(pool, drawHashHex, disputeId, round, domain = DRAW_D
   const poolLen = pool.length;
   if (poolLen < size) throw new Error("not enough eligible jurors");
   const target = size;
-  const two64 = 1n << 64n;
   const panel = [];
   for (let slot = 0; slot < target; slot += 1) {
-    const offset = (slot * 8) % 32;
-    const window = new Uint8Array(8);
-    for (let i = 0; i < 8; i += 1) {
-      window[i] = hashBytes[(offset + i) % 32];
-    }
+    const input = concatBytes([
+      hashBytes,
+      u64ToLeBytes(domain),
+      u64ToLeBytes(round),
+      u64ToLeBytes(disputeId),
+      u64ToLeBytes(slot),
+    ]);
+    const digest = sha256Bytes(input);
     let value = 0n;
     for (let i = 0; i < 8; i += 1) {
-      value |= BigInt(window[i]) << BigInt(8 * i);
+      value |= BigInt(digest[i]) << BigInt(8 * i);
     }
-    const sum =
-      (value + BigInt(disputeId) + BigInt(round) + BigInt(domain) * BigInt(DRAW_DOMAIN_SCALE) + BigInt(slot)) %
-      two64;
-    let candidate = Number(sum % BigInt(poolLen));
+    let candidate = Number(value % BigInt(poolLen));
     while (panel.includes(candidate)) {
       candidate = (candidate + 1) % poolLen;
     }

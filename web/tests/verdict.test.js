@@ -18,7 +18,6 @@ import {
   REVEAL_WINDOW,
   DRAW_DOMAIN_FIRST,
   DRAW_DOMAIN_APPEAL,
-  DRAW_DOMAIN_SCALE,
   MAX_RESCHEDULES,
   VOTE_PAY,
   VOTE_REFUND,
@@ -324,12 +323,14 @@ describe("u64ToLeBytes", () => {
 });
 
 describe("domain separation", () => {
-  test("the domain is scaled, so round 1 domain 0 and round 0 domain 1 differ", () => {
-    assert.equal(DRAW_DOMAIN_SCALE, 1000000007);
+  test("the domain is a separate hash input, so round 6 domain 0 and round 0 domain 1 differ", () => {
     assert.equal(MAX_RESCHEDULES, 3);
     const pool = ["a", "b", "c", "d", "e", "f", "g"];
     const hash = sha256Hex("domain-separation-check");
-    const first = derivePanel(pool, hash, 0, 1, DRAW_DOMAIN_FIRST, 3);
+    // The old arithmetic collided here: round 6 with domain 0
+    // contributed the same as round 0 with domain 1. The hash
+    // construction keeps the two draws apart.
+    const first = derivePanel(pool, hash, 0, 6, DRAW_DOMAIN_FIRST, 3);
     const appeal = derivePanel(pool, hash, 0, 0, DRAW_DOMAIN_APPEAL, 3);
     assert.notDeepEqual(first, appeal);
     assert.notDeepEqual(

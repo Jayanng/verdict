@@ -30,7 +30,8 @@ the parties to the deal.
 | Bond floor | 30,000 | Twice the largest juror fee times the panel size |
 | Minimum draw delay | 1 epoch | Every draw commits to a future epoch at least one epoch ahead |
 | Reveal window | 2 epochs | Time a drawn juror has to reveal, counted from the draw epoch |
-| Draw domain | 0 first round, 1 appeal | Multiplied by 1,000,000,007 before it is added to the panel derivation, so the two rounds never draw the same panel from the same hash |
+| Draw domain | 0 first round, 1 appeal | Hashed into the panel derivation with the draw hash, round, dispute id, and slot, so the two rounds draw independently from the same hash |
+| Commit window | 1 epoch | Time a drawn juror has to commit, counted from the draw epoch |
 | Reschedule cap | 3 per draw | A missed draw window can be rescheduled at most three times |
 
 ## Draw rules
@@ -50,13 +51,36 @@ A missed draw window is rescheduled past the current epoch: the new draw
 epoch is the current epoch plus one, never the current epoch itself, so a
 rescheduled draw still uses a future epoch hash. The reschedule is
 recorded on chain. A draw can be rescheduled at most three times: after
-the third reschedule the draw must execute in its locked epoch.
+the third reschedule the draw must execute in its locked epoch. If it
+does not, and the final locked epoch passes, the dispute closes with no
+ruling instead of staying frozen: the whole principal returns to the
+payer, no juror fee is taken, and any appeal fee returns in full. The
+same rule applies to an appeal draw that never executes.
 
-The panel derivation folds in a draw domain: 0 for the first round, 1
-for the appeal, multiplied by 1,000,000,007 before it is added. The same
-hash, pool, dispute id, and round nonce can never produce the same panel
-across the two rounds: a domain step moves the sum far more than any round
-step can.
+The panel derivation hashes the draw domain with the draw hash, the
+round nonce, the dispute id, and the slot: for each slot, SHA-256 over
+(draw hash, domain, round, dispute id, slot), the first eight bytes
+little-endian, modulo the pool length, probing forward to the next free
+juror. The two rounds draw independently from the same hash: a domain
+step changes every slot hash, so no round step can reproduce the other
+round's panel. The derivation makes no claim that the two panels can
+never share a juror: with the same pool, the same juror can be drawn in
+both rounds, and that is fine, since each round votes and is paid
+separately.
+
+A drawn juror has one epoch to commit and two epochs to reveal, counted
+from the draw epoch. The commit deadline is the draw epoch plus one, the
+reveal deadline is the draw epoch plus two, and both are stored on the
+dispute at draw time. A commitment after the commit deadline is refused,
+and a reveal after the reveal deadline is refused, in the first round and
+in the appeal round alike. A commitment at the deadline itself is
+accepted, and so is a reveal at the deadline itself. No vote can land on
+a dispute that is settled or closed: all four voting methods refuse a
+settled dispute and a closed dispute first.
+
+Evidence has no cutoff before the end of a round: a party may post
+evidence at any time while the dispute is open. Once the dispute is
+settled or closed, evidence is refused.
 
 A majority is a strict majority of the full panel, with at least a
 majority of the panel revealed first: two matching votes of three for a
@@ -128,9 +152,12 @@ A juror who is owed nothing cannot claim.
 
 One appeal per dispute, opened by a party to the dispute, only after the
 first round has reached a majority ruling and only before the dispute
-settles. The appellant posts exactly the appeal fee, 35,000, in TARI. The
-appeal draws seven jurors from the same eligible pool, in a fresh
-future-epoch draw with a new commitment and a fresh round nonce.
+settles. The appellant posts exactly the appeal fee, 35,000, in TARI.
+The appellant's account is derived from the signing key, the same
+derivation settle uses for the payer and payee accounts, so no caller can
+name another account to receive the appeal-fee refund. The appeal draws
+seven jurors from the same eligible pool, in a fresh future-epoch draw
+with a new commitment and a fresh round nonce.
 
 The appeal ruling settles the dispute. The appeal majority jurors are paid
 one juror fee each from the appeal fee, plus a share of the bonds forfeited
@@ -176,7 +203,17 @@ finished when it is fully revealed. A replacement round is also finished
 once its own reveal window has passed with no majority, so the replacement
 round always gets its full window to vote before the close can run, and a
 round that stalls after its replacement still exits instead of staying
-frozen. The same rule applies to the appeal round.
+frozen. The same rule applies to the appeal round. A close under appeal
+needs the first round finished as well as the appeal round: a close is
+refused while the first round can still reach a ruling, even when the
+appeal round is already done.
+
+A dispute whose draw never executed closes the same way once its
+reschedules are spent and its final locked epoch has passed: the draw can
+never execute after that, so there is no ruling to wait for. The same
+applies to an appeal draw that never executes. The close needs no panel,
+no votes, and no juror fee: the whole principal returns to the payer and
+any appeal fee returns in full.
 
 The close executes a ruling with a payee amount of 0, which unfreezes the escrow, and the whole
 principal returns to the payer: the opener's fee is refunded in full, and
@@ -199,6 +236,8 @@ withdrawn.
    settle.
 4. If the appeal round fails, one appeal replacement draw, then settle.
 5. If no round can reach a majority, close with no ruling.
+6. If a draw never executes and its reschedules are spent, close with no
+   ruling once the final locked epoch passes.
 
 No step can repeat forever, and no step can leave the escrow frozen. The
 court never freezes money indefinitely.

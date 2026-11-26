@@ -42,7 +42,7 @@ walletless simulation walkthrough.
 The proof page mirrors the template rules as they stand in
 `templates/verdict/src/lib.rs`: panel derivation from draw hash, dispute id,
 round, draw domain, and frozen pool; commitment hash of (vote, salt, dispute
-id, juror); `execute_ruling(dispute_id, payee_amount)` gated by the
+id, juror); `execute_ruling(dispute_id, payee_amount)` restricted by the
 caller-component rule plus the in-method assert plus `OwnerRule::None`. The
 shared rules live in `src/verdict.js` and are imported by both the page and
 the tests. The mirror covers the settlement matrix, the quorum rule, the
@@ -53,11 +53,13 @@ micro-Tari, and `settle` and the no-ruling close take no payout accounts
 from the caller: the court derives the payer and payee accounts from the
 escrow, as the template does.
 
-Two points the simulation mirrors from the template on purpose, so they are
-not defects: the template has no epoch check on commit or reveal, so the
-simulation has none either, and the template freezes the escrow before the
-pool-size check, so the simulation does the same. Changing either would be a
-template design change, not a simulation fix.
+Two points where the simulation and the template differ on purpose. The
+template freezes the escrow before the pool-size check and relies on the
+transaction rolling back; the simulation has no rollback, so it validates,
+including the panel-size check, before calling freeze. The template and
+the simulation both check the commit and reveal windows now: a commitment
+after the commit deadline and a reveal after the reveal deadline are
+refused in both rounds.
 
 ## Sample data
 

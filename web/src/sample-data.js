@@ -117,12 +117,12 @@ export const SAMPLE = {
       "drawHash": "9e8d1651911f4dcfd4b7b0cb0d5500847067c5a6a3a17a086663d15ac7f2d4dd",
       "panel": [
         {
-          "key": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
-          "label": "Tester juror 1"
+          "key": "ebdc05af7578287d384d53bd81d45bbdec876da033f92ba1c7022c8083244bda",
+          "label": "Tester juror 6"
         },
         {
-          "key": "1d9429b3acb66e2979ecbb6542a7a62e0a69d85876ceca6af78f97804a581923",
-          "label": "Tester juror 4"
+          "key": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
+          "label": "Tester juror 1"
         },
         {
           "key": "be9c7a473fb3199ec93de864c633fff5abc2e375e0992aaa442114613f6bced2",
@@ -130,24 +130,24 @@ export const SAMPLE = {
         }
       ],
       "panelIndexes": [
+        5,
         0,
-        3,
         2
       ],
       "commits": [
         {
+          "juror": "ebdc05af7578287d384d53bd81d45bbdec876da033f92ba1c7022c8083244bda",
+          "jurorLabel": "Tester juror 6",
+          "vote": 0,
+          "salt": "ecf34ed0f210490d108e0cdf5a0f9671daadc32e6e2adee0e844774ac9370a25",
+          "commitment": "f3654de8e5c000674871a41dabf6bd167b1068c54cbd4fc4d9f8cbc209cd871a"
+        },
+        {
           "juror": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
           "jurorLabel": "Tester juror 1",
           "vote": 0,
-          "salt": "ecf34ed0f210490d108e0cdf5a0f9671daadc32e6e2adee0e844774ac9370a25",
-          "commitment": "7611d7ff11c2b50379ef537516ebd7b2bb9881320d2eec75e08c6aac80a36dd6"
-        },
-        {
-          "juror": "1d9429b3acb66e2979ecbb6542a7a62e0a69d85876ceca6af78f97804a581923",
-          "jurorLabel": "Tester juror 4",
-          "vote": 0,
           "salt": "d950b2e6be7ca8570988451fa1dfb07f97037211b39f58fcb202e6a34b4be2eb",
-          "commitment": "854e9e63224436cfe20c169fec1326cb9d82f33c9c6c53425d2dbe35aabbc78d"
+          "commitment": "e105d2aa3a9cded30d2da509f87e30a6dcbdc07d9069979a7dfc8988dcae55a3"
         },
         {
           "juror": "be9c7a473fb3199ec93de864c633fff5abc2e375e0992aaa442114613f6bced2",
@@ -159,13 +159,13 @@ export const SAMPLE = {
       ],
       "reveals": [
         {
-          "juror": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
-          "jurorLabel": "Tester juror 1",
+          "juror": "ebdc05af7578287d384d53bd81d45bbdec876da033f92ba1c7022c8083244bda",
+          "jurorLabel": "Tester juror 6",
           "vote": 0
         },
         {
-          "juror": "1d9429b3acb66e2979ecbb6542a7a62e0a69d85876ceca6af78f97804a581923",
-          "jurorLabel": "Tester juror 4",
+          "juror": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
+          "jurorLabel": "Tester juror 1",
           "vote": 0
         },
         {
@@ -225,60 +225,60 @@ export const SAMPLE = {
       "drawHash": "c46508fe57841fa4a0db3231a1b66713e4ab962e6024072725f2414d4c00003b",
       "panel": [
         {
-          "key": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
-          "label": "Tester juror 1"
-        },
-        {
-          "key": "79d559ef6f215028f3cfffb22180c9205a9fa7ab06e2e33c5f0d1ca52778f7e3",
-          "label": "Tester juror 2"
+          "key": "be9c7a473fb3199ec93de864c633fff5abc2e375e0992aaa442114613f6bced2",
+          "label": "Tester juror 3"
         },
         {
           "key": "69e808f8368ed254cc1e01a3ad36d9ae8e18b5d5d2eabfb3382b34c52d2982be",
           "label": "Tester juror 5"
+        },
+        {
+          "key": "79d559ef6f215028f3cfffb22180c9205a9fa7ab06e2e33c5f0d1ca52778f7e3",
+          "label": "Tester juror 2"
         }
       ],
       "panelIndexes": [
-        0,
-        1,
-        4
+        2,
+        4,
+        1
       ],
       "commits": [
         {
-          "juror": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
-          "jurorLabel": "Tester juror 1",
+          "juror": "be9c7a473fb3199ec93de864c633fff5abc2e375e0992aaa442114613f6bced2",
+          "jurorLabel": "Tester juror 3",
           "vote": 1,
           "salt": "cd4a46dca68af8049a49fb6f63bb8dfcf89797622d2d48639541454e3f7104dd",
-          "commitment": "cd87cf69e677ba3dda65a060e071df07a0d0c3493c1bbf6db5966c01e96744a5"
-        },
-        {
-          "juror": "79d559ef6f215028f3cfffb22180c9205a9fa7ab06e2e33c5f0d1ca52778f7e3",
-          "jurorLabel": "Tester juror 2",
-          "vote": 1,
-          "salt": "ebc2405b830f428d19d83175f8d7cdf7cadded24c59599dbed35e2868b42dca9",
-          "commitment": "be60b0599aeef9362274f4bcb2c3cd13012e8a83927914063c5c173cec5db374"
+          "commitment": "1eeff7d4817b75cdc1abc0a7c479f2fe60fe1669d59ebaef8192a597e80984ae"
         },
         {
           "juror": "69e808f8368ed254cc1e01a3ad36d9ae8e18b5d5d2eabfb3382b34c52d2982be",
           "jurorLabel": "Tester juror 5",
+          "vote": 1,
+          "salt": "ebc2405b830f428d19d83175f8d7cdf7cadded24c59599dbed35e2868b42dca9",
+          "commitment": "40aaedcb48ad6cc2138f6994800f7b688820da870b78fbca33bad44d7f7d238f"
+        },
+        {
+          "juror": "79d559ef6f215028f3cfffb22180c9205a9fa7ab06e2e33c5f0d1ca52778f7e3",
+          "jurorLabel": "Tester juror 2",
           "vote": 0,
           "salt": "fa9c51a6b3df42ec31219afd01ccdb2a26aa400a6d7320c4e04d43a0f273da14",
-          "commitment": "66edf07b8e37f92bd161b829000589f5117ec5102a1f5cf2be77b1007812a9b2"
+          "commitment": "23e791299bb1d23e74acf33f8610d582a70673ada9cb11065dad7ce01194eb00"
         }
       ],
       "reveals": [
         {
-          "juror": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
-          "jurorLabel": "Tester juror 1",
-          "vote": 1
-        },
-        {
-          "juror": "79d559ef6f215028f3cfffb22180c9205a9fa7ab06e2e33c5f0d1ca52778f7e3",
-          "jurorLabel": "Tester juror 2",
+          "juror": "be9c7a473fb3199ec93de864c633fff5abc2e375e0992aaa442114613f6bced2",
+          "jurorLabel": "Tester juror 3",
           "vote": 1
         },
         {
           "juror": "69e808f8368ed254cc1e01a3ad36d9ae8e18b5d5d2eabfb3382b34c52d2982be",
           "jurorLabel": "Tester juror 5",
+          "vote": 1
+        },
+        {
+          "juror": "79d559ef6f215028f3cfffb22180c9205a9fa7ab06e2e33c5f0d1ca52778f7e3",
+          "jurorLabel": "Tester juror 2",
           "vote": 0
         }
       ],
@@ -330,22 +330,22 @@ export const SAMPLE = {
       "drawHash": "eed2206e9cd45dc96d958fb4a045478c456f83c1e6e0ecb96a8e75d7039eecf1",
       "panel": [
         {
-          "key": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
-          "label": "Tester juror 1"
-        },
-        {
-          "key": "79d559ef6f215028f3cfffb22180c9205a9fa7ab06e2e33c5f0d1ca52778f7e3",
-          "label": "Tester juror 2"
+          "key": "be9c7a473fb3199ec93de864c633fff5abc2e375e0992aaa442114613f6bced2",
+          "label": "Tester juror 3"
         },
         {
           "key": "ebdc05af7578287d384d53bd81d45bbdec876da033f92ba1c7022c8083244bda",
           "label": "Tester juror 6"
+        },
+        {
+          "key": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
+          "label": "Tester juror 1"
         }
       ],
       "panelIndexes": [
-        0,
-        1,
-        5
+        2,
+        5,
+        0
       ],
       "commits": [],
       "reveals": [],

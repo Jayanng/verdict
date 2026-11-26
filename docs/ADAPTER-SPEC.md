@@ -155,7 +155,7 @@ court the same way, whatever deal shape it carries.
 1. Add `arbitrator: ComponentAddress` to the constructor, store it
    immutable, and reject a deal that names no court.
 2. Add `freeze_for_dispute`, `execute_ruling`, and `withdraw_remainder`
-   with the signatures above, gated by the caller-component rule and the
+   with the signatures above, restricted by the caller-component rule and the
    in-method assert.
 3. Create the component with `OwnerRule::None`, with no admin method and
    no upgrade path.

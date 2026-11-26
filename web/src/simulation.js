@@ -36,6 +36,12 @@ import {
 
 export const NO_OUTCOME = 4;
 
+// The identity the simulated court uses when it calls the escrow. The
+// simulated escrow accepts settlement calls from exactly this identity,
+// the same way the real escrow accepts them only from the court named as
+// arbitrator at creation.
+export const COURT_ID = "verdict-court";
+
 function fail(message) {
   throw new Error(message);
 }
@@ -60,14 +66,24 @@ function validVote(vote) {
   }
 }
 
+// A draw delay must be a whole number of epochs, at least the minimum:
+// a fractional delay would produce a draw epoch that cannot exist.
+function validDelay(delay) {
+  if (!Number.isInteger(delay)) fail("draw delay must be a whole number of epochs");
+  if (delay < MIN_DRAW_DELAY) fail("draw delay must be at least one epoch");
+}
+
 function defaultEpochHash(epoch) {
   return sha256Hex(`verdict-sim-epoch-${epoch}`);
 }
 
 // One simulated escrow: a vault funded by the payer, frozen by a dispute,
-// executed at most once by the court.
+// executed at most once by the court. Only the court identity may execute
+// a ruling or withdraw the remainder: any other caller is refused, the
+// same way the real escrow refuses every caller but the court named as
+// arbitrator at creation.
 export class SimEscrow {
-  constructor(id, payer, payee, principal) {
+  constructor(id, payer, payee, principal, courtId = COURT_ID) {
     this.id = id;
     this.payer = payer;
     this.payee = payee;
@@ -77,6 +93,7 @@ export class SimEscrow {
     this.disputeId = null;
     this.rulingExecuted = false;
     this.remainderWithdrawn = false;
+    this.courtId = courtId;
   }
 
   freezeForDispute(disputeId) {
@@ -86,7 +103,8 @@ export class SimEscrow {
     this.disputeId = disputeId;
   }
 
-  executeRuling(disputeId, payeeAmount) {
+  executeRuling(disputeId, payeeAmount, caller = this.courtId) {
+    if (caller !== this.courtId) fail("only the court can execute a ruling");
     if (!this.frozen || this.disputeId !== disputeId) fail("escrow not frozen for this dispute");
     if (this.rulingExecuted) fail("ruling already executed");
     if (payeeAmount > this.vault) fail("payee amount exceeds the principal");
@@ -95,7 +113,8 @@ export class SimEscrow {
     return payeeAmount;
   }
 
-  withdrawRemainder() {
+  withdrawRemainder(caller = this.courtId) {
+    if (caller !== this.courtId) fail("only the court can withdraw the remainder");
     if (!this.rulingExecuted) fail("no ruling has executed");
     if (this.remainderWithdrawn) fail("remainder already withdrawn");
     this.remainderWithdrawn = true;
@@ -106,7 +125,9 @@ export class SimEscrow {
 }
 
 // The simulated court. Accounts are plain string ids with balances in
-// micro-Tari; juror keys are the same strings the sample data uses.
+// micro-Tari; juror keys are the same strings the sample data uses. The
+// court calls the escrow with its own identity, COURT_ID, and the escrow
+// refuses every other caller.
 export class SimCourt {
   constructor(poolKeys = []) {
     this.epoch = 0;
@@ -118,6 +139,7 @@ export class SimCourt {
     this.disputes = [];
     this.feeVault = 0n;
     this.poolKeys = [...poolKeys];
+    this.courtId = COURT_ID;
   }
 
   fund(account, value) {
@@ -129,6 +151,9 @@ export class SimCourt {
   }
 
   setEpoch(epoch) {
+    if (!Number.isInteger(epoch) || epoch < 0) {
+      fail("epoch must be a non-negative whole number");
+    }
     this.epoch = epoch;
   }
 
@@ -177,8 +202,38 @@ export class SimCourt {
     return dispute;
   }
 
+  // A snapshot of everything settlement can touch, so a failing
+  // settlement can be rolled back exactly. Disputes are plain data and
+  // clone cleanly; escrows keep their class, so their fields are copied
+  // back onto the same objects instead.
+  snapshotState() {
+    return {
+      disputes: this.disputes.map((d) => structuredClone(d)),
+      escrows: new Map(
+        [...this.escrows.entries()].map(([id, escrow]) => [id, { ...escrow }]),
+      ),
+      balances: new Map(this.balances),
+      feeVault: this.feeVault,
+      bonds: new Map(this.bonds),
+      jurors: new Map(
+        [...this.jurors.entries()].map(([key, juror]) => [key, { ...juror }]),
+      ),
+    };
+  }
+
+  restoreState(snapshot) {
+    this.disputes = snapshot.disputes;
+    for (const [id, fields] of snapshot.escrows) {
+      Object.assign(this.escrows.get(id), fields);
+    }
+    this.balances = snapshot.balances;
+    this.feeVault = snapshot.feeVault;
+    this.bonds = snapshot.bonds;
+    this.jurors = snapshot.jurors;
+  }
+
   openDispute(escrowId, drawDelay) {
-    if (drawDelay < MIN_DRAW_DELAY) fail("draw delay must be at least one epoch");
+    validDelay(drawDelay);
     const escrow = this.escrows.get(escrowId);
     if (!escrow) fail("escrow not found");
     const disputeId = this.disputes.length;
@@ -186,8 +241,12 @@ export class SimCourt {
     const openEpochHash = this.epochHash(openEpoch);
     const drawEpoch = openEpoch + drawDelay;
     const eligiblePool = [...this.jurors.keys()];
-    escrow.freezeForDispute(disputeId);
+    // All validation runs before the freeze: the simulation has no
+    // rollback, so a failed opening must leave the escrow unfrozen.
+    // The template freezes first and relies on the transaction rolling
+    // back, which the simulation cannot do.
     if (eligiblePool.length < PANEL_SIZE) fail("not enough eligible jurors to draw a panel");
+    escrow.freezeForDispute(disputeId);
     this.disputes.push({
       id: disputeId,
       escrowId,
@@ -199,6 +258,7 @@ export class SimCourt {
       drawEpoch,
       drawHash: null,
       revealDeadline: 0,
+      commitDeadline: 0,
       drawn: false,
       settled: false,
       closedNoRuling: false,
@@ -223,6 +283,7 @@ export class SimCourt {
       appealDrawEpoch: 0,
       appealDrawHash: null,
       appealRevealDeadline: 0,
+      appealCommitDeadline: 0,
       appealDrawn: false,
       appealRound: 0,
       appealReplacementUsed: false,
@@ -270,6 +331,7 @@ export class SimCourt {
     dispute.drawHash = drawHash;
     dispute.panel = indexes.map((i) => dispute.eligiblePool[i]);
     dispute.revealDeadline = dispute.drawEpoch + REVEAL_WINDOW;
+    dispute.commitDeadline = dispute.drawEpoch + 1;
     dispute.drawn = true;
     return { drawHash, panel: [...dispute.panel] };
   }
@@ -289,6 +351,9 @@ export class SimCourt {
   commitVote(disputeId, juror, vote, salt) {
     const dispute = this.dispute(disputeId);
     if (!dispute.drawn) fail("jury not drawn for this dispute");
+    if (dispute.settled) fail("dispute already settled");
+    if (dispute.closedNoRuling) fail("dispute closed with no ruling");
+    if (this.epoch > dispute.commitDeadline) fail("commit window has passed");
     if (!dispute.panel.includes(juror)) fail("juror not drawn for this dispute");
     if (dispute.commits.has(juror)) fail("juror already committed a vote");
     validVote(vote);
@@ -299,6 +364,10 @@ export class SimCourt {
 
   revealVote(disputeId, juror, vote, salt) {
     const dispute = this.dispute(disputeId);
+    if (!dispute.drawn) fail("jury not drawn for this dispute");
+    if (dispute.settled) fail("dispute already settled");
+    if (dispute.closedNoRuling) fail("dispute closed with no ruling");
+    if (this.epoch > dispute.revealDeadline) fail("reveal window has passed");
     validVote(vote);
     const stored = dispute.commits.get(juror);
     if (stored === undefined) fail("no vote commitment from this juror");
@@ -311,7 +380,7 @@ export class SimCourt {
 
   replaceJury(disputeId, caller, drawDelay) {
     const dispute = this.dispute(disputeId);
-    if (drawDelay < MIN_DRAW_DELAY) fail("draw delay must be at least one epoch");
+    validDelay(drawDelay);
     if (caller !== dispute.payer && caller !== dispute.payee) {
       fail("only a party to the dispute can replace the jury");
     }
@@ -383,7 +452,21 @@ export class SimCourt {
     });
   }
 
+  // Settlement is atomic: every precondition is checked and every amount
+  // computed before state moves, and if anything still fails, the whole
+  // call rolls back to the snapshot taken on entry, so a failing
+  // settlement leaves the simulation exactly as it was.
   settle(disputeId) {
+    const snapshot = this.snapshotState();
+    try {
+      return this.settleInner(disputeId);
+    } catch (err) {
+      this.restoreState(snapshot);
+      throw err;
+    }
+  }
+
+  settleInner(disputeId) {
     const dispute = this.dispute(disputeId);
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
@@ -407,9 +490,9 @@ export class SimCourt {
     const escrow = this.escrows.get(dispute.escrowId);
     const amounts = settleAmounts(dispute.principal, outcome, first.count);
     const fees = amounts.fees;
-    const payeeMoved = escrow.executeRuling(disputeId, amounts.payeeAmount);
+    const payeeMoved = escrow.executeRuling(disputeId, amounts.payeeAmount, this.courtId);
     if (payeeMoved !== amounts.payeeAmount) fail("escrow paid a different amount than ruled");
-    const remainder = escrow.withdrawRemainder();
+    const remainder = escrow.withdrawRemainder(this.courtId);
     if (remainder !== dispute.principal - amounts.payeeAmount) {
       fail("escrow remainder does not match the principal");
     }
@@ -465,7 +548,7 @@ export class SimCourt {
 
   openAppeal(disputeId, caller, fee, drawDelay) {
     const dispute = this.dispute(disputeId);
-    if (drawDelay < MIN_DRAW_DELAY) fail("draw delay must be at least one epoch");
+    validDelay(drawDelay);
     if (caller !== dispute.payer && caller !== dispute.payee) {
       fail("only a party to the dispute can appeal");
     }
@@ -515,6 +598,7 @@ export class SimCourt {
     dispute.appealDrawHash = drawHash;
     dispute.appealPanel = indexes.map((i) => pool[i]);
     dispute.appealRevealDeadline = dispute.appealDrawEpoch + REVEAL_WINDOW;
+    dispute.appealCommitDeadline = dispute.appealDrawEpoch + 1;
     dispute.appealDrawn = true;
     return { drawHash, panel: [...dispute.appealPanel] };
   }
@@ -538,6 +622,9 @@ export class SimCourt {
     const dispute = this.dispute(disputeId);
     if (!dispute.appealed) fail("no appeal opened for this dispute");
     if (!dispute.appealDrawn) fail("appeal jury not drawn");
+    if (dispute.settled) fail("dispute already settled");
+    if (dispute.closedNoRuling) fail("dispute closed with no ruling");
+    if (this.epoch > dispute.appealCommitDeadline) fail("appeal commit window has passed");
     if (!dispute.appealPanel.includes(juror)) fail("juror not drawn for this appeal");
     if (dispute.appealCommits.has(juror)) fail("juror already committed an appeal vote");
     validVote(vote);
@@ -548,6 +635,11 @@ export class SimCourt {
 
   revealAppealVote(disputeId, juror, vote, salt) {
     const dispute = this.dispute(disputeId);
+    if (!dispute.appealed) fail("no appeal opened for this dispute");
+    if (!dispute.appealDrawn) fail("appeal jury not drawn");
+    if (dispute.settled) fail("dispute already settled");
+    if (dispute.closedNoRuling) fail("dispute closed with no ruling");
+    if (this.epoch > dispute.appealRevealDeadline) fail("appeal reveal window has passed");
     validVote(vote);
     const stored = dispute.appealCommits.get(juror);
     if (stored === undefined) fail("no appeal vote commitment from this juror");
@@ -560,7 +652,7 @@ export class SimCourt {
 
   replaceAppealJury(disputeId, caller, drawDelay) {
     const dispute = this.dispute(disputeId);
-    if (drawDelay < MIN_DRAW_DELAY) fail("draw delay must be at least one epoch");
+    validDelay(drawDelay);
     if (caller !== dispute.payer && caller !== dispute.payee) {
       fail("only a party to the dispute can replace the appeal jury");
     }
@@ -589,7 +681,6 @@ export class SimCourt {
     const dispute = this.dispute(disputeId);
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute already closed with no ruling");
-    if (!dispute.drawn) fail("jury not drawn for this dispute");
     // A round is finished when it is fully revealed. A replacement
     // round is also finished once its own reveal window has passed with
     // no majority, so the replacement round always gets its full window
@@ -602,20 +693,42 @@ export class SimCourt {
       dispute.appealDrawn &&
       (dispute.appealReveals.size === dispute.appealPanel.length ||
         (dispute.appealReplacementUsed && this.epoch >= dispute.appealRevealDeadline));
+    // A first round that already ruled is final once its reveal window
+    // has passed: no more first-round reveals can land after the
+    // deadline, so its majority cannot change. A close under appeal
+    // needs that as well as the appeal round finished, so both rounds
+    // are done before the dispute exits.
+    const firstRoundFinal =
+      dispute.drawn &&
+      (dispute.reveals.size === dispute.panel.length ||
+        this.epoch >= dispute.revealDeadline);
+    // A draw that never executed can never execute once its
+    // reschedules are spent and its final locked epoch has passed. The
+    // dispute then closes the same way instead of staying frozen.
+    const neverDrawn =
+      !dispute.drawn &&
+      dispute.reschedules >= MAX_RESCHEDULES &&
+      this.epoch > dispute.drawEpoch;
+    const appealNeverDrawn =
+      dispute.appealed &&
+      !dispute.appealDrawn &&
+      dispute.appealReschedules >= MAX_RESCHEDULES &&
+      this.epoch > dispute.appealDrawEpoch;
     const firstNoMajority = this.firstOutcome(dispute).vote === null;
     const appealNoMajority = this.appealOutcome(dispute).vote === null;
     if (dispute.appealed) {
-      if (!(appealNoMajority && appealFinished)) {
+      if (!firstRoundFinal) fail("first round can still reach a ruling");
+      if (!(appealNoMajority && (appealFinished || appealNeverDrawn))) {
         fail("appeal round can still reach a ruling");
       }
-    } else if (!(firstNoMajority && roundFinished)) {
+    } else if (!(firstNoMajority && roundFinished) && !neverDrawn) {
       fail("first round can still reach a ruling");
     }
     const escrow = this.escrows.get(dispute.escrowId);
     const principal = escrow.vault;
-    const payeeMoved = escrow.executeRuling(disputeId, 0n);
+    const payeeMoved = escrow.executeRuling(disputeId, 0n, this.courtId);
     if (payeeMoved !== 0n) fail("no-ruling payee amount must be 0");
-    const remainder = escrow.withdrawRemainder();
+    const remainder = escrow.withdrawRemainder(this.courtId);
     if (remainder !== principal) fail("no-ruling remainder must be the whole principal");
     this.fund(dispute.payer, remainder);
     const rulingPanel = dispute.appealed ? dispute.appealPanel : dispute.panel;

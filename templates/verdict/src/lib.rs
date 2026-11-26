@@ -30,16 +30,21 @@ mod verdict {
     /// window has passed, so a replacement never lands while honest
     /// jurors are still within their time to reveal.
     const REVEAL_WINDOW: u64 = 2;
+    /// Commit window, in epochs after the draw epoch. A drawn juror
+    /// must commit within this window: a commitment posted after it
+    /// is refused, so no juror can wait to see other jurors' revealed
+    /// votes before committing. The window is shorter than the reveal
+    /// window, so a commitment always precedes its reveal.
+    const COMMIT_WINDOW: u64 = 1;
     /// Draw domain folded into the panel derivation. The first round
-    /// draws with domain 0 and the appeal with domain 1, so the same
-    /// hash, pool, dispute, and round can never produce the same panel
-    /// across the two rounds. The domain is multiplied by a large
-    /// constant before it is added, so a domain step can never match a
-    /// round step: round 1 with domain 0 and round 0 with domain 1
-    /// contribute different values.
+    /// draws with domain 0 and the appeal with domain 1. The domain
+    /// is hashed into the derivation along with the draw hash, the
+    /// round, the dispute id, and the slot, so each round's panel is
+    /// derived independently. The derivation makes no promise that two
+    /// draws produce different panels: panels drawn from different
+    /// domains are independent draws, and may still match by chance.
     const DRAW_DOMAIN_FIRST: u64 = 0;
     const DRAW_DOMAIN_APPEAL: u64 = 1;
-    const DRAW_DOMAIN_SCALE: u64 = 1_000_000_007;
     /// Times a missed draw window can be rescheduled, per draw. A draw
     /// that keeps being missed stops moving after this many reschedules,
     /// so the bounded exit in the docs holds.
@@ -135,6 +140,10 @@ mod verdict {
         /// draw epoch plus REVEAL_WINDOW. A round can only be replaced
         /// once the current epoch has reached this epoch.
         pub reveal_deadline: u64,
+        /// Last epoch of the commit window, set at draw time to the
+        /// draw epoch plus COMMIT_WINDOW. A commitment posted after
+        /// this epoch is refused.
+        pub commit_deadline: u64,
         /// True once the draw has executed in E*.
         pub drawn: bool,
         /// True once the ruling has settled.
@@ -196,6 +205,9 @@ mod verdict {
         /// Last epoch of the appeal reveal window, set at appeal draw
         /// time to the appeal draw epoch plus REVEAL_WINDOW.
         pub appeal_reveal_deadline: u64,
+        /// Last epoch of the appeal commit window, set at appeal draw
+        /// time to the appeal draw epoch plus COMMIT_WINDOW.
+        pub appeal_commit_deadline: u64,
         /// True once the appeal draw has executed.
         pub appeal_drawn: bool,
         /// True once the one appeal replacement draw has been used.
@@ -288,6 +300,7 @@ mod verdict {
                 draw_epoch,
                 draw_hash: Hash32::from([0u8; 32]),
                 reveal_deadline: 0,
+                commit_deadline: 0,
                 drawn: false,
                 settled: false,
                 closed_no_ruling: false,
@@ -313,6 +326,7 @@ mod verdict {
                 appeal_draw_epoch: 0,
                 appeal_draw_hash: Hash32::from([0u8; 32]),
                 appeal_reveal_deadline: 0,
+                appeal_commit_deadline: 0,
                 appeal_drawn: false,
                 appeal_replacement_used: false,
                 appeal_round: 0,
@@ -327,6 +341,10 @@ mod verdict {
         /// Submit one evidence item for the caller's side of a dispute.
         /// At most 3 items per side, by index 0, 1, 2. An item, once
         /// posted, cannot be changed: posting to a filled index fails.
+        /// Evidence can be posted until the dispute settles or closes:
+        /// the protocol has no earlier evidence cutoff, but once the
+        /// dispute is terminal its record is immutable, so posting to
+        /// a settled or closed dispute fails.
         pub fn submit_evidence(
             &mut self,
             dispute_id: u64,
@@ -336,6 +354,9 @@ mod verdict {
             bytes_len: u64,
         ) {
             assert!(index < EVIDENCE_LIMIT, "evidence index out of range");
+            let dispute = self.dispute(dispute_id);
+            assert!(!dispute.settled, "dispute already settled");
+            assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
             let escrow = self.dispute(dispute_id).escrow;
             let payer: RistrettoPublicKeyBytes =
                 ComponentManager::get(escrow).call("payer", args![]);
@@ -396,10 +417,14 @@ mod verdict {
             let deadline = Consensus::current_epoch()
                 .checked_add(REVEAL_WINDOW)
                 .expect("reveal deadline overflows epoch range");
+            let commit_deadline = Consensus::current_epoch()
+                .checked_add(COMMIT_WINDOW)
+                .expect("commit deadline overflows epoch range");
             let dispute = self.dispute_mut(dispute_id);
             dispute.draw_hash = hash;
             dispute.drawn = true;
             dispute.reveal_deadline = deadline;
+            dispute.commit_deadline = commit_deadline;
             dispute.panel = panel;
             hash
         }
@@ -504,11 +529,21 @@ mod verdict {
         }
 
         /// Commit a vote: post the hash of (vote, salt, dispute id,
-        /// juror). Only a drawn juror can commit, and only once.
+        /// juror). Only a drawn juror can commit, and only once. A
+        /// commitment is refused once the commit window has passed, so
+        /// no juror can wait to see other jurors' revealed votes before
+        /// committing, and no vote can be added to a settled or closed
+        /// dispute.
         pub fn commit_vote(&mut self, dispute_id: u64, commitment: Hash32) {
             let signer = CallerContext::transaction_signer_public_key();
             let dispute = self.dispute_mut(dispute_id);
             assert!(dispute.drawn, "jury not drawn for this dispute");
+            assert!(!dispute.settled, "dispute already settled");
+            assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
+            assert!(
+                Consensus::current_epoch() <= dispute.commit_deadline,
+                "commit window has passed"
+            );
             assert!(
                 dispute.panel.contains(&signer),
                 "juror not drawn for this dispute"
@@ -524,12 +559,21 @@ mod verdict {
         }
 
         /// Reveal a vote: post the vote and salt. The court recomputes
-        /// the commitment and it must match. Only once per juror.
+        /// the commitment and it must match. Only once per juror. A
+        /// reveal is refused once the reveal window has passed, and no
+        /// vote can be added to a settled or closed dispute.
         pub fn reveal_vote(&mut self, dispute_id: u64, vote: u64, salt: Hash32) {
             let signer = CallerContext::transaction_signer_public_key();
             assert!(vote <= VOTE_REFUSE, "invalid vote");
             let expected = Self::vote_commitment(vote, salt, dispute_id, signer);
             let dispute = self.dispute_mut(dispute_id);
+            assert!(dispute.drawn, "jury not drawn for this dispute");
+            assert!(!dispute.settled, "dispute already settled");
+            assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
+            assert!(
+                Consensus::current_epoch() <= dispute.reveal_deadline,
+                "reveal window has passed"
+            );
             let stored = dispute
                 .commits
                 .iter()
@@ -787,14 +831,11 @@ mod verdict {
         /// round has reached a majority ruling, and only before the
         /// dispute settles. The fee is exactly APPEAL_FEE in TARI. The
         /// delay must be at least one epoch, and the eligible pool must
-        /// already hold a full appeal panel of seven jurors.
-        pub fn open_appeal(
-            &mut self,
-            dispute_id: u64,
-            draw_delay: u64,
-            fee: Bucket,
-            appellant_account: ComponentAddress,
-        ) {
+        /// already hold a full appeal panel of seven jurors. The
+        /// account the unspent appeal fee returns to is derived from
+        /// the appellant's signing key, never taken from the caller, so
+        /// no appellant can name a refund destination of their own.
+        pub fn open_appeal(&mut self, dispute_id: u64, draw_delay: u64, fee: Bucket) {
             assert!(
                 draw_delay >= MIN_DRAW_DELAY,
                 "draw delay must be at least one epoch"
@@ -838,6 +879,7 @@ mod verdict {
             }
             let now = Consensus::current_epoch();
             self.fee_vault.deposit(fee);
+            let appellant_account = Self::account_address(signer);
             let dispute = self.dispute_mut(dispute_id);
             dispute.appealed = true;
             dispute.appellant = Some(signer);
@@ -854,8 +896,9 @@ mod verdict {
         /// Execute the appeal jury draw. Only during the locked appeal
         /// draw epoch, only once. Same derivation as the first draw,
         /// with a seven-juror panel and a fresh round nonce, in the
-        /// appeal draw domain, so the appeal panel can never match a
-        /// first-round panel drawn from the same hash.
+        /// appeal draw domain, so the appeal panel is derived
+        /// independently of any first-round panel drawn from the same
+        /// hash.
         pub fn draw_appeal_jury(&mut self, dispute_id: u64) -> Hash32 {
             {
                 let dispute = self.dispute(dispute_id);
@@ -888,10 +931,14 @@ mod verdict {
             let deadline = Consensus::current_epoch()
                 .checked_add(REVEAL_WINDOW)
                 .expect("appeal reveal deadline overflows epoch range");
+            let commit_deadline = Consensus::current_epoch()
+                .checked_add(COMMIT_WINDOW)
+                .expect("appeal commit deadline overflows epoch range");
             let dispute = self.dispute_mut(dispute_id);
             dispute.appeal_draw_hash = hash;
             dispute.appeal_drawn = true;
             dispute.appeal_reveal_deadline = deadline;
+            dispute.appeal_commit_deadline = commit_deadline;
             dispute.appeal_panel = panel;
             hash
         }
@@ -925,12 +972,21 @@ mod verdict {
         }
 
         /// Commit an appeal vote: post the hash of (vote, salt, dispute
-        /// id, juror). Only a drawn appeal juror can commit, once.
+        /// id, juror). Only a drawn appeal juror can commit, once. A
+        /// commitment is refused once the appeal commit window has
+        /// passed, and no vote can be added to a settled or closed
+        /// dispute.
         pub fn commit_appeal_vote(&mut self, dispute_id: u64, commitment: Hash32) {
             let signer = CallerContext::transaction_signer_public_key();
             let dispute = self.dispute_mut(dispute_id);
             assert!(dispute.appealed, "no appeal opened for this dispute");
             assert!(dispute.appeal_drawn, "appeal jury not drawn");
+            assert!(!dispute.settled, "dispute already settled");
+            assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
+            assert!(
+                Consensus::current_epoch() <= dispute.appeal_commit_deadline,
+                "appeal commit window has passed"
+            );
             assert!(
                 dispute.appeal_panel.contains(&signer),
                 "juror not drawn for this appeal"
@@ -946,13 +1002,22 @@ mod verdict {
         }
 
         /// Reveal an appeal vote: post the vote and salt. The court
-        /// recomputes the commitment and it must match. Only once.
+        /// recomputes the commitment and it must match. Only once. A
+        /// reveal is refused once the appeal reveal window has passed,
+        /// and no vote can be added to a settled or closed dispute.
         pub fn reveal_appeal_vote(&mut self, dispute_id: u64, vote: u64, salt: Hash32) {
             let signer = CallerContext::transaction_signer_public_key();
             assert!(vote <= VOTE_REFUSE, "invalid vote");
             let expected = Self::vote_commitment(vote, salt, dispute_id, signer);
             let dispute = self.dispute_mut(dispute_id);
             assert!(dispute.appealed, "no appeal opened for this dispute");
+            assert!(dispute.appeal_drawn, "appeal jury not drawn");
+            assert!(!dispute.settled, "dispute already settled");
+            assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
+            assert!(
+                Consensus::current_epoch() <= dispute.appeal_reveal_deadline,
+                "appeal reveal window has passed"
+            );
             let stored = dispute
                 .appeal_commits
                 .iter()
@@ -1048,19 +1113,28 @@ mod verdict {
         /// round is also finished once its own reveal window has
         /// passed with no majority, so a replacement round always gets
         /// its full window to vote before the close can run, and a
-        /// round that stalls after its replacement still exits. The
-        /// ruling executes with a payee amount of 0, which unfreezes
-        /// the escrow, and the whole principal returns to the payer:
-        /// the opener's fee is refunded in full, no juror fee is taken.
-        /// The payer account is read from the escrow, never taken from
-        /// the caller, so no caller can redirect the principal.
-        /// Jurors who were drawn and did not reveal are slashed, and
-        /// the forfeited bonds go to the jurors who did reveal, other
-        /// than jurors who voted to refuse: a refusing juror is neither
-        /// paid nor slashed. When nobody who revealed is payable,
-        /// nobody is slashed: there is no one to pay, and the court
-        /// keeps nothing. An unspent appeal fee returns to the
-        /// appellant in full.
+        /// round that stalls after its replacement still exits. A draw
+        /// that never executed closes the same way once its reschedules
+        /// are spent and its final locked epoch has passed, so a missed
+        /// draw can never leave the escrow frozen: the principal
+        /// returns to the payer in full, no juror fee is taken, and
+        /// any appeal fee returns to the appellant in full. Under
+        /// appeal, both rounds must be done before the dispute exits:
+        /// the first round is final once its reveal window has passed,
+        /// since no more first-round reveals can land after the
+        /// deadline, and the appeal round must be finished the same
+        /// way. The ruling executes with a payee amount of 0, which
+        /// unfreezes the escrow, and the whole principal returns to
+        /// the payer: the opener's fee is refunded in full, no juror
+        /// fee is taken. The payer account is read from the escrow,
+        /// never taken from the caller, so no caller can redirect the
+        /// principal. Jurors who were drawn and did not reveal are
+        /// slashed, and the forfeited bonds go to the jurors who did
+        /// reveal, other than jurors who voted to refuse: a refusing
+        /// juror is neither paid nor slashed. When nobody who revealed
+        /// is payable, nobody is slashed: there is no one to pay, and
+        /// the court keeps nothing. An unspent appeal fee returns to
+        /// the appellant in full.
         pub fn close_no_ruling(&mut self, dispute_id: u64) {
             let escrow = {
                 let dispute = self.dispute(dispute_id);
@@ -1069,7 +1143,7 @@ mod verdict {
                     !dispute.closed_no_ruling,
                     "dispute already closed with no ruling"
                 );
-                assert!(dispute.drawn, "jury not drawn for this dispute");
+                let now = Consensus::current_epoch();
                 // A round is finished when it is fully revealed. A
                 // replacement round is also finished once its own
                 // reveal window has passed with no majority: the new
@@ -1077,12 +1151,31 @@ mod verdict {
                 // still exits instead of staying frozen.
                 let round_finished = dispute.drawn
                     && (dispute.reveals.len() == dispute.panel.len()
-                        || (dispute.replacement_used
-                            && Consensus::current_epoch() >= dispute.reveal_deadline));
+                        || (dispute.replacement_used && now >= dispute.reveal_deadline));
                 let appeal_finished = dispute.appeal_drawn
                     && (dispute.appeal_reveals.len() == dispute.appeal_panel.len()
                         || (dispute.appeal_replacement_used
-                            && Consensus::current_epoch() >= dispute.appeal_reveal_deadline));
+                            && now >= dispute.appeal_reveal_deadline));
+                // A first round that already ruled is final once its
+                // reveal window has passed: no more first-round reveals
+                // can land after the deadline, so its majority cannot
+                // change. A close under appeal needs that as well as
+                // the appeal round finished, so both rounds are done
+                // before the dispute exits.
+                let first_round_final = dispute.drawn
+                    && (dispute.reveals.len() == dispute.panel.len()
+                        || now >= dispute.reveal_deadline);
+                // A draw that never executed can never execute once
+                // its reschedules are spent and its final locked epoch
+                // has passed. The dispute then closes the same way
+                // instead of staying frozen forever.
+                let never_drawn = !dispute.drawn
+                    && dispute.reschedules >= MAX_RESCHEDULES
+                    && now > dispute.draw_epoch;
+                let appeal_never_drawn = dispute.appealed
+                    && !dispute.appeal_drawn
+                    && dispute.appeal_reschedules >= MAX_RESCHEDULES
+                    && now > dispute.appeal_draw_epoch;
                 let first_no_majority =
                     Self::majority_outcome(&dispute.reveals, dispute.panel.len() as u64).is_none();
                 let appeal_no_majority = Self::majority_outcome(
@@ -1091,16 +1184,14 @@ mod verdict {
                 )
                 .is_none();
                 if dispute.appealed {
-                    // The first round already ruled, which is why the
-                    // appeal exists. Only the appeal round can still
-                    // reach a ruling, so only it gates the close.
+                    assert!(first_round_final, "first round can still reach a ruling");
                     assert!(
-                        appeal_no_majority && appeal_finished,
+                        appeal_no_majority && (appeal_finished || appeal_never_drawn),
                         "appeal round can still reach a ruling"
                     );
                 } else {
                     assert!(
-                        first_no_majority && round_finished,
+                        (first_no_majority && round_finished) || never_drawn,
                         "first round can still reach a ruling"
                     );
                 }
@@ -1393,9 +1484,20 @@ mod verdict {
             self.dispute(dispute_id).reveal_deadline
         }
 
+        /// Last epoch of the commit window for a dispute, set at draw
+        /// time. A commitment posted after this epoch is refused.
+        pub fn dispute_commit_deadline(&self, dispute_id: u64) -> u64 {
+            self.dispute(dispute_id).commit_deadline
+        }
+
         /// Last epoch of the appeal reveal window for a dispute.
         pub fn dispute_appeal_reveal_deadline(&self, dispute_id: u64) -> u64 {
             self.dispute(dispute_id).appeal_reveal_deadline
+        }
+
+        /// Last epoch of the appeal commit window for a dispute.
+        pub fn dispute_appeal_commit_deadline(&self, dispute_id: u64) -> u64 {
+            self.dispute(dispute_id).appeal_commit_deadline
         }
 
         /// Appeal draw round nonce, 0 for the first appeal draw.
@@ -1677,17 +1779,15 @@ mod verdict {
         }
 
         /// Derive the panel from the drawn hash, the dispute id, the draw
-        /// round, the draw domain, and the frozen eligible pool. The
-        /// domain separates the first round (0) from the appeal (1):
-        /// the domain is multiplied by a large constant before it is
-        /// added, so the same hash, pool, dispute, and round never
-        /// produce the same panel across the two rounds: a domain step
-        /// moves the sum far more than any round step can. For each
-        /// slot, read an 8-byte window of the hash, fold in the dispute
-        /// id, the round, the domain, and the slot, and take the result
-        /// modulo the pool size, probing forward until an unpicked
-        /// juror is found. Returns at most `target_size` jurors, fewer
-        /// when the pool is smaller.
+        /// round, the draw domain, and the frozen eligible pool. For
+        /// each slot, hash the draw hash together with the domain, the
+        /// round, the dispute id, and the slot, and take the first eight
+        /// bytes of the digest modulo the pool size, probing forward
+        /// until an unpicked juror is found. The domain is a separate
+        /// hash input, so each round's panel is derived independently
+        /// of the other round's: no arithmetic between the domain and
+        /// the round can make two draws collide. Returns at most
+        /// `target_size` jurors, fewer when the pool is smaller.
         fn derive_panel(
             pool: &[RistrettoPublicKeyBytes],
             draw_hash: Hash32,
@@ -1701,21 +1801,20 @@ mod verdict {
                 return Vec::new();
             }
             let target = target_size.min(pool_len) as usize;
-            let hash_bytes: &[u8] = draw_hash.as_ref();
             let mut panel: Vec<RistrettoPublicKeyBytes> = Vec::new();
             for slot in 0..target as u64 {
-                let offset = ((slot * 8) % 32) as usize;
-                let mut bytes = [0u8; 8];
-                for i in 0..8 {
-                    bytes[i] = hash_bytes[(offset + i) % 32];
-                }
-                let value = u64::from_le_bytes(bytes);
-                let mut candidate = (value
-                    .wrapping_add(dispute_id)
-                    .wrapping_add(round)
-                    .wrapping_add(domain.wrapping_mul(DRAW_DOMAIN_SCALE))
-                    .wrapping_add(slot))
-                    % pool_len;
+                let digest = intrinsics::hash_sha256_parts(&[
+                    draw_hash.as_ref(),
+                    &domain.to_le_bytes(),
+                    &round.to_le_bytes(),
+                    &dispute_id.to_le_bytes(),
+                    &slot.to_le_bytes(),
+                ]);
+                let bytes: &[u8] = digest.as_ref();
+                let mut window = [0u8; 8];
+                window.copy_from_slice(&bytes[0..8]);
+                let value = u64::from_le_bytes(window);
+                let mut candidate = value % pool_len;
                 while panel.contains(&pool[candidate as usize]) {
                     candidate = (candidate + 1) % pool_len;
                 }
