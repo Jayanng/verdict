@@ -1710,6 +1710,7 @@ name = "milestone-escrow"
 version = "0.1.0"
 dependencies = [
  "ootle_byte_type",
+ "sha2 0.10.9",
  "tari_crypto",
  "tari_engine_types",
  "tari_ootle_common_types",
@@ -1974,6 +1975,7 @@ name = "payment-escrow"
 version = "0.1.0"
 dependencies = [
  "ootle_byte_type",
+ "sha2 0.10.9",
  "tari_crypto",
  "tari_engine_types",
  "tari_ootle_common_types",

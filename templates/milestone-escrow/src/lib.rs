@@ -4,7 +4,7 @@
 // each milestone delivered, the client approves, and approval releases
 // exactly that milestone's slice to the payee. Unreleased money is
 // refundable to the payer after the deadline. The escrow holds its own
-// vault, and its two settlement methods accept calls from exactly one
+// vault, and its settlement methods accept calls from exactly one
 // component, the arbitrator (Verdict court) named at creation. The court
 // never touches the vault; the escrow's own code moves it.
 //
@@ -18,18 +18,17 @@
 //   3. OwnerRule::None on the production constructor, so no owner path can
 //      bypass the rule.
 //
-// Verification constructors (used by the engine tests to isolate the
-// layers). Test fixtures only: never create a live escrow holding real
-// funds with these. A live escrow always uses `new`, which is ownerless,
-// with the caller rule and the in-method assert on.
-//   - `new_owned`: OwnerRule::OwnedBySigner, caller rule, assert OFF. The
-//     owned twin: proves the owner bypasses the caller rule.
-//   - `new_rule_open`: OwnerRule::None, allow-all rules, assert ON. The
-//     assert-only twin: proves the in-method assert rejects a stranger
-//     even when the access rule would allow the call.
+// The production constructor `new` is the only constructor. There are no
+// verification constructors: the template's `#[template]` macro generates
+// a dispatcher arm for every public function, and it does not respect
+// `#[cfg]`, so a test-only constructor gated by a cargo feature would
+// still be dispatched in a production build and break it. The escrow's
+// own guards (frozen, dispute id, amounts, ruling shape) are defense in
+// depth behind the court, verified by audit, and the end-to-end tests
+// prove legitimate rulings pass them.
 //
 // Deadline semantics, by method. The deadline is an epoch, set at creation,
-// and must be after the creation epoch. Only refund is deadline-gated in
+// and must be after the creation epoch. Only refund is deadline-limited in
 // the sense that it requires the deadline to have passed; every other
 // party method works before the deadline and stops working after it, so
 // the deadline is the point where the deal stops moving forward and the
@@ -73,6 +72,25 @@ use tari_template_lib::prelude::*;
 mod milestone_escrow {
     use super::*;
 
+    /// Ruling outcome values, matching the court's vote values:
+    /// pay 0, refund 1, split 2, no ruling 4.
+    const OUTCOME_PAY: u64 = 0;
+    const OUTCOME_REFUND: u64 = 1;
+    const OUTCOME_SPLIT: u64 = 2;
+    const OUTCOME_NO_RULING: u64 = 4;
+
+    /// The largest juror fee total the court can take from the
+    /// principal: one fee per juror in the first-round majority, and
+    /// the first-round panel has three jurors, so at most three fees.
+    /// The court pays appeal jurors from the appeal fee, not from the
+    /// principal, so the principal never funds more than this. This
+    /// must stay equal to the court template's PANEL_SIZE * JUROR_FEE
+    /// (3 * 5,000). The escrow uses it to bound the payer's gross
+    /// amount on a pay ruling, which is exactly the fee, and to bound
+    /// the split, where the payer's gross is the fee plus the payer's
+    /// half of the post-fee principal.
+    const MAX_PRINCIPAL_FEE: u64 = 15_000;
+
     pub struct MilestoneEscrow {
         /// The court component named at creation. Immutable, never changed.
         arbitrator: ComponentAddress,
@@ -99,17 +117,10 @@ mod milestone_escrow {
         frozen_dispute_id: u64,
         /// True once a ruling has executed. A ruling executes at most once.
         ruling_executed: bool,
-        /// True once the remainder has been withdrawn to the payer after a
-        /// ruling. Set by withdraw_remainder, so the remainder can move
-        /// exactly once and no funds stay locked in the vault.
-        remainder_withdrawn: bool,
         /// True once the payer has cancelled the agreement.
         cancelled: bool,
         /// True once the payer has refunded the unreleased remainder.
         refunded: bool,
-        /// When false the in-method caller assert is skipped
-        /// (used by the owned twin so the owner bypass is observable).
-        assert_caller: bool,
     }
 
     pub struct Milestone {
@@ -124,71 +135,33 @@ mod milestone_escrow {
 
     impl MilestoneEscrow {
         /// Production form: ownerless, caller rule, in-method assert on.
+        /// This is the only constructor. It takes no configuration: the
+        /// owner rule, the assert, and the access rules are fixed here,
+        /// so no caller can create a weakened escrow.
         pub fn new(
             arbitrator: ComponentAddress,
             payee: RistrettoPublicKeyBytes,
             milestone_amounts: Vec<u64>,
             deadline: u64,
         ) -> Component<Self> {
-            Self::create(
-                arbitrator,
-                payee,
-                milestone_amounts,
-                deadline,
-                OwnerRule::None,
-                true,
-                false,
-            )
+            let state = Self::build_state(arbitrator, payee, milestone_amounts, deadline);
+            let rules = AccessRules::allow_all()
+                .add_method_rule("freeze_for_dispute", rule!(caller_component(arbitrator)))
+                .add_method_rule("execute_ruling", rule!(caller_component(arbitrator)));
+            Component::new(state)
+                .with_access_rules(rules)
+                .with_owner_rule(OwnerRule::None)
+                .create()
         }
 
-        /// Owned twin: the creator owns the component, so the
-        /// owner bypass applies to the caller rule. Assert off so the
-        /// bypass is observable instead of masked by the assert.
-        pub fn new_owned(
+        /// Validate the creation inputs and build the escrow state.
+        /// The in-method caller assert is on.
+        fn build_state(
             arbitrator: ComponentAddress,
             payee: RistrettoPublicKeyBytes,
             milestone_amounts: Vec<u64>,
             deadline: u64,
-        ) -> Component<Self> {
-            Self::create(
-                arbitrator,
-                payee,
-                milestone_amounts,
-                deadline,
-                OwnerRule::OwnedBySigner,
-                false,
-                false,
-            )
-        }
-
-        /// Assert-only twin: ownerless, rules wide open, the
-        /// in-method caller assert is the only check.
-        pub fn new_rule_open(
-            arbitrator: ComponentAddress,
-            payee: RistrettoPublicKeyBytes,
-            milestone_amounts: Vec<u64>,
-            deadline: u64,
-        ) -> Component<Self> {
-            Self::create(
-                arbitrator,
-                payee,
-                milestone_amounts,
-                deadline,
-                OwnerRule::None,
-                true,
-                true,
-            )
-        }
-
-        fn create(
-            arbitrator: ComponentAddress,
-            payee: RistrettoPublicKeyBytes,
-            milestone_amounts: Vec<u64>,
-            deadline: u64,
-            owner_rule: OwnerRule,
-            assert_caller: bool,
-            rules_open: bool,
-        ) -> Component<Self> {
+        ) -> Self {
             let payer = CallerContext::transaction_signer_public_key();
             assert!(
                 payee != payer,
@@ -215,7 +188,7 @@ mod milestone_escrow {
                     released: false,
                 });
             }
-            let state = Self {
+            Self {
                 arbitrator,
                 payer,
                 payee,
@@ -228,23 +201,9 @@ mod milestone_escrow {
                 frozen: false,
                 frozen_dispute_id: 0,
                 ruling_executed: false,
-                remainder_withdrawn: false,
                 cancelled: false,
                 refunded: false,
-                assert_caller,
-            };
-            let rules = if rules_open {
-                AccessRules::allow_all()
-            } else {
-                AccessRules::allow_all()
-                    .add_method_rule("freeze_for_dispute", rule!(caller_component(arbitrator)))
-                    .add_method_rule("execute_ruling", rule!(caller_component(arbitrator)))
-                    .add_method_rule("withdraw_remainder", rule!(caller_component(arbitrator)))
-            };
-            Component::new(state)
-                .with_access_rules(rules)
-                .with_owner_rule(owner_rule)
-                .create()
+            }
         }
 
         /// Fund the escrow. Only the payer may fund, before the deadline,
@@ -292,12 +251,38 @@ mod milestone_escrow {
             milestone.delivered = true;
         }
 
+        /// The account address of a public key, derived the same way
+        /// the engine derives an account created for that key: the
+        /// Blake2b-256 hash, under the engine component-address domain,
+        /// of the account template address (all bytes) and the key.
+        /// The engine hashes the template address and the key in their
+        /// Borsh form, so the key carries its 4-byte little-endian
+        /// length prefix. Approve derives the payee account from the
+        /// stored payee key with this function, so the payout account
+        /// is never caller-supplied and a payer cannot misroute a
+        /// release to themselves.
+        fn account_address(key: RistrettoPublicKeyBytes) -> ComponentAddress {
+            // Domain tag: the 8-byte little-endian length 41, then
+            // "com.tari.ootle.engine", ".v", "0", ".", "ComponentAddress".
+            const DOMAIN_TAG: &[u8] =
+                b"\x29\x00\x00\x00\x00\x00\x00\x00com.tari.ootle.engine.v0.ComponentAddress";
+            let hash = intrinsics::hash_blake2b_parts(&[
+                DOMAIN_TAG,
+                &[0u8; 32],
+                &32u32.to_le_bytes(),
+                key.as_ref(),
+            ]);
+            ComponentAddress::new(tari_template_lib::types::ObjectKey::from_array(
+                hash.leading_bytes::<32>(),
+            ))
+        }
+
         /// Approve a delivered milestone. Only the payer may approve,
         /// before the deadline, while the agreement is open. Approval
         /// releases exactly that milestone's slice to the payee's account,
         /// and the slice must be funded before it can move. The escrow
         /// deposits the slice itself, so the caller cannot misroute it.
-        pub fn approve(&mut self, index: u64, payee_account: ComponentAddress) {
+        pub fn approve(&mut self, index: u64) {
             self.assert_open();
             self.assert_before_deadline("approval is closed after the deadline");
             assert!(
@@ -322,6 +307,7 @@ mod milestone_escrow {
                 .checked_add(amount)
                 .expect("released total overflow");
             let bucket = self.vault.withdraw(Amount::from_u64(amount));
+            let payee_account = Self::account_address(self.payee);
             ComponentManager::get(payee_account).invoke("deposit", args![bucket]);
         }
 
@@ -397,55 +383,111 @@ mod milestone_escrow {
 
         /// Execute a ruling: move the escrow's own vault per the ruling.
         /// Only the arbitrator component, only while frozen for this
-        /// dispute, exactly once. Returns the payee's share as a bucket;
-        /// the remainder stays in the vault (the settlement matrix routes
-        /// the remainder). Conservation is exact: payee bucket + vault
-        /// remainder == funded total. This is the only settlement path:
-        /// it withdraws from the vault directly and never reuses approve
-        /// or any other payer-only method.
-        pub fn execute_ruling(&mut self, dispute_id: u64, payee_amount: u64) -> Bucket {
+        /// dispute, exactly once. Takes the outcome and the amounts pair
+        /// (payee amount, payer amount), where the payer amount is the
+        /// gross amount routed to the payer side, before the court takes
+        /// juror fees out of it, and the payee amount is net. Returns
+        /// both buckets in one atomic call, (payee bucket, payer bucket),
+        /// so no funds stay in the vault and no second call is needed.
+        /// The ruling is validated with checked arithmetic: the outcome
+        /// must be pay, refund, split, or no ruling; the two amounts
+        /// must sum to the vault balance exactly; a refund and a
+        /// no-ruling ruling pay the payee nothing. A ruling that fails
+        /// any of these is refused and leaves the escrow untouched.
+        /// Conservation is exact: payee bucket + payer bucket == vault
+        /// balance. This is the only settlement path: it withdraws from
+        /// the vault directly and never reuses approve or any other
+        /// payer-only method.
+        pub fn execute_ruling(
+            &mut self,
+            dispute_id: u64,
+            outcome: u64,
+            amounts: (u64, u64),
+        ) -> (Bucket, Bucket) {
             self.assert_arbitrator();
+            assert!(!self.ruling_executed, "ruling already executed");
             assert!(self.frozen, "escrow is not frozen for a dispute");
             assert_eq!(
                 dispute_id, self.frozen_dispute_id,
                 "dispute id does not match the frozen dispute"
             );
-            assert!(!self.ruling_executed, "ruling already executed");
+            assert!(
+                outcome == OUTCOME_PAY
+                    || outcome == OUTCOME_REFUND
+                    || outcome == OUTCOME_SPLIT
+                    || outcome == OUTCOME_NO_RULING,
+                "invalid ruling outcome"
+            );
+            let (payee_amount, payer_amount) = amounts;
+            if outcome == OUTCOME_REFUND {
+                assert!(payee_amount == 0, "refund pays the payee nothing");
+            }
+            if outcome == OUTCOME_NO_RULING {
+                assert!(payee_amount == 0, "no ruling pays the payee nothing");
+            }
             let balance = self
                 .vault
                 .balance()
                 .to_u64_checked()
                 .expect("vault balance out of range");
+            let total = payee_amount
+                .checked_add(payer_amount)
+                .expect("ruling amounts overflow");
             assert!(
-                payee_amount <= balance,
-                "payee amount exceeds the vault balance"
+                total == balance,
+                "ruling amounts must equal the vault balance"
             );
+            // The pay and split cells are validated by shape, after
+            // conservation. The court computes the exact fee, but the
+            // escrow knows the fee's bounds, so a ruling that
+            // contradicts them is refused even though it conserves:
+            //   - Pay: the payer's gross amount is exactly the juror
+            //     fee, which is at most MAX_PRINCIPAL_FEE. A pay
+            //     whose payer amount exceeds that total is refused,
+            //     because it hands the payer more than the fee. When
+            //     the whole principal is at most the fee total, the
+            //     payer's gross is exactly the fee, the court takes
+            //     it as fees, and the payer nets nothing, so the pay
+            //     executes.
+            //   - Split: the payer's gross is the fee plus the payer's
+            //     half of the post-fee principal, and the payee gets
+            //     the other half, rounded up. So the payee is never
+            //     more than one micro-Tari above the payer, and the
+            //     payer is never more than the maximum fee above the
+            //     payee. A split that hands everything to one side is
+            //     refused. The saturating subtraction keeps the
+            //     comparison from overflowing on a u64 boundary.
+            if outcome == OUTCOME_PAY {
+                assert!(
+                    payer_amount <= MAX_PRINCIPAL_FEE,
+                    "pay fee exceeds the maximum juror fee total"
+                );
+            }
+            if outcome == OUTCOME_SPLIT {
+                // A split must pay both sides: neither amount may be 0.
+                // The bounds above alone still allow (0, principal),
+                // which hands everything to one side.
+                assert!(payee_amount > 0, "split must pay the payee");
+                assert!(payer_amount > 0, "split must pay the payer");
+                assert!(
+                    payee_amount.saturating_sub(payer_amount) <= 1,
+                    "split payee exceeds the payer by more than one micro-Tari"
+                );
+                assert!(
+                    payer_amount.saturating_sub(payee_amount) <= MAX_PRINCIPAL_FEE,
+                    "split payer exceeds the payee by more than the maximum juror fee total"
+                );
+            }
             self.ruling_executed = true;
             self.frozen = false;
             self.released = self
                 .released
-                .checked_add(payee_amount)
+                .checked_add(total)
                 .expect("released total overflow");
-            self.vault.withdraw(Amount::from_u64(payee_amount))
-        }
-
-        /// Withdraw the remainder to the payer after a ruling. Only the
-        /// arbitrator, only once, only after a ruling has executed. The
-        /// court calls this right after execute_ruling, so a split or a
-        /// refund never leaves funds locked in the vault. If the ruling
-        /// paid the full balance, the remainder is zero and this returns
-        /// an empty bucket.
-        pub fn withdraw_remainder(&mut self) -> Bucket {
-            self.assert_arbitrator();
-            assert!(self.ruling_executed, "no ruling has executed");
-            assert!(!self.remainder_withdrawn, "remainder already withdrawn");
-            self.remainder_withdrawn = true;
-            let balance = self
-                .vault
-                .balance()
-                .to_u64_checked()
-                .expect("vault balance out of range");
-            self.vault.withdraw(Amount::from_u64(balance))
+            (
+                self.vault.withdraw(Amount::from_u64(payee_amount)),
+                self.vault.withdraw(Amount::from_u64(payer_amount)),
+            )
         }
 
         // ----- read-only getters -----
@@ -483,11 +525,11 @@ mod milestone_escrow {
         }
 
         pub fn is_complete(&self) -> bool {
-            self.released == self.total || (self.ruling_executed && self.remainder_withdrawn)
+            self.released == self.total || self.ruling_executed
         }
 
         /// True once the escrow can no longer change state: completed,
-        /// ruled with the remainder withdrawn, cancelled, or refunded.
+        /// ruled, cancelled, or refunded.
         pub fn is_terminal(&self) -> bool {
             self.is_complete() || self.cancelled || self.refunded
         }
@@ -556,11 +598,9 @@ mod milestone_escrow {
         }
 
         fn assert_arbitrator(&self) {
-            if self.assert_caller {
-                CallerContext::assert_badge_in_scope(&NonFungibleAddress::caller_component_badge(
-                    self.arbitrator,
-                ));
-            }
+            CallerContext::assert_badge_in_scope(&NonFungibleAddress::caller_component_badge(
+                self.arbitrator,
+            ));
         }
     }
 }

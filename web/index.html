@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verdict, the Ootle jury court</title>
+<meta name="description" content="When an Ootle escrow deal goes wrong, three bonded strangers rule it and the loser pays. The court never touches the money.">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="rare-ui.css">
+</head>
+<body>
+
+<div class="navwrap">
+  <div class="nav">
+    <a class="brand" href="#/" aria-label="Verdict home"><span class="mark">v</span>Verdict</a>
+    <nav aria-label="Main">
+      <a href="#/" data-nav="home">Home</a>
+      <a href="#/app" data-nav="app">App</a>
+      <a href="#/app" data-nav="disputes">Disputes</a>
+      <a href="#/simulate" data-nav="simulate">Simulate</a>
+      <a href="#/" data-home-section="how">How it works</a>
+      <a href="#/" data-home-section="faq">FAQ</a>
+    </nav>
+    <a class="cta" href="#/open">Open a dispute</a>
+    <button class="nav-toggle" type="button" aria-label="Open menu" aria-expanded="false">&#9776;</button>
+  </div>
+  <div class="nav-menu" id="navMenu">
+    <a href="#/">Home</a>
+    <a href="#/app">App</a>
+    <a href="#/app">Disputes</a>
+    <a href="#/simulate">Simulate</a>
+    <a href="#/" data-home-section="how">How it works</a>
+    <a href="#/" data-home-section="faq">FAQ</a>
+    <a class="cta-link" href="#/open">Open a dispute</a>
+  </div>
+</div>
+
+<main id="page">
+  <header class="hero">
+    <div class="hero-inner">
+      <div>
+        <p class="eyebrow">The Ootle jury court, Tari November Build Contest</p>
+        <h1>Three bonded strangers rule. <span class="blue">The loser pays.</span></h1>
+        <p class="subhead">The court never touches the money. The escrow executes the ruling.</p>
+        <p class="trust">Ownerless court and ownerless escrows. Every ruling is recomputable from published inputs.</p>
+        <div class="btns">
+          <a class="rui-btn" href="#/open">Open a dispute</a>
+          <a class="rui-btn rui-btn-ghost" href="#/" data-home-section="how">See how it works</a>
+        </div>
+      </div>
+      <div class="ruling-card" aria-label="Sample ruling">
+        <span class="corner tl"></span><span class="corner tr"></span>
+        <span class="corner bl"></span><span class="corner br"></span>
+        <div class="rc-head">
+          <span class="rc-title">Dispute #0, milestone escrow</span>
+          <span class="rui-pill green">Settled</span>
+        </div>
+        <div class="rc-amount">490,000 <small>micro-Tari to the payee</small></div>
+        <div class="rc-row"><span class="k">Panel</span><span class="v">3 jurors drawn</span></div>
+        <div class="rc-row"><span class="k">Ruling</span><span class="v">Pay, 2 to 1</span></div>
+        <div class="rc-row"><span class="k">Juror fees</span><span class="v">10,000, paid first from the principal</span></div>
+        <div class="rc-row"><span class="k">Vault</span><span class="v">Escrow executed the ruling</span></div>
+        <div class="rc-votes">
+          <span class="rc-vote pay">Juror 1: pay</span>
+          <span class="rc-vote pay">Juror 2: pay</span>
+          <span class="rc-vote">Juror 3: refund</span>
+        </div>
+        <p class="rc-foot">Sample dispute, shown to explain the flow. No money moved.</p>
+      </div>
+    </div>
+  </header>
+
+  <div class="rui-ticker" aria-hidden="true">
+    <div class="rui-ticker-track" id="tickerTrack"></div>
+  </div>
+
+  <section class="section">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>The court never touches the money.</h2>
+        <p class="sec-note">A freelancer and a client lock money in an Ootle escrow. The deal goes wrong, the client goes silent, or the freelancer disappears. Either side opens a dispute, three bonded strangers rule it, and the escrow's own code moves its own vault. The court issues the ruling and nothing else.</p>
+      </div>
+      <div class="court-grid">
+        <div class="court-card"><div class="letter">C</div><h3>Open a dispute</h3><div class="tag">either side, one dispute</div><p>Either side opens a dispute and the escrow freezes its own vault, so nothing moves while the court rules.</p></div>
+        <div class="court-card"><div class="letter">O</div><h3>Post the evidence</h3><div class="tag">up to 3 items per side</div><p>Each item is bound by its SHA-256 hash. Posted evidence cannot change, and the page checks the hash at display time.</p></div>
+        <div class="court-card"><div class="letter">U</div><h3>Draw the jury</h3><div class="tag">future epoch hash</div><p>Three bonded strangers, drawn from a future epoch hash nobody could predict when the dispute opened.</p></div>
+        <div class="court-card"><div class="letter">R</div><h3>Vote in secret</h3><div class="tag">commit, then reveal</div><p>Jurors commit a hash of their vote first, then reveal it, so nobody can copy another juror's vote.</p></div>
+        <div class="court-card"><div class="letter">T</div><h3>The escrow executes</h3><div class="tag">indirect form</div><p>The court issues the ruling. The escrow's own ownerless code moves its own vault, and its settlement method accepts calls from exactly one component: the court.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section tight">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>Eight rules the court cannot break.</h2>
+        <p class="sec-note">The invariants, in plain language. Each one is checked by engine tests in the repo.</p>
+      </div>
+      <div class="cols-2">
+        <div class="plain-card"><span class="num">01</span><h3>The vault moves only inside the escrow</h3><p>Only on a ruling delivered through execute_ruling, and only when the court calls it. Never on a single vote, never by the court directly.</p></div>
+        <div class="plain-card"><span class="num">02</span><h3>One vote per drawn juror</h3><p>A juror votes at most once per dispute, and only if drawn for it.</p></div>
+        <div class="plain-card"><span class="num">03</span><h3>Every path conserves micro-Tari</h3><p>Settlement never pays out more than the escrow holds. Dust is resolved by largest remainder.</p></div>
+        <div class="plain-card"><span class="num">04</span><h3>A ruling executes at most once</h3><p>Settle once, and the second call is refused by the court and by the escrow.</p></div>
+        <div class="plain-card"><span class="num">05</span><h3>Evidence cannot change</h3><p>An evidence hash, once posted, cannot be changed.</p></div>
+        <div class="plain-card"><span class="num">06</span><h3>The draw is recomputable</h3><p>Anyone can re-derive the panel from the published inputs: future epoch hash, pool list, dispute id, round.</p></div>
+        <div class="plain-card"><span class="num">07</span><h3>No owner anywhere</h3><p>No owner, no admin method, no upgrade, on the court or either escrow. Ownerlessness is what makes the caller rule absolute.</p></div>
+        <div class="plain-card"><span class="num">08</span><h3>The court can always be exited</h3><p>Ruling, appeal, or bounded no-ruling fallback. Money is never frozen forever.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section tight" id="why">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>Why only Tari.</h2>
+        <p class="sec-note">Verdict depends on Ootle features no other chain carries the same way. Each one gets one sentence and a link to the proof.</p>
+      </div>
+      <div class="why-row"><span class="n">1</span><div><h3>Caller-component access rules</h3><p>The escrow accepts settlement calls from exactly one component, the court, enforced by the caller-component rule.</p><a class="proof" href="https://github.com/Jayanng/verdict/blob/adejoke/templates/milestone-escrow/src/lib.rs">Milestone escrow source &rarr;</a></div></div>
+      <div class="why-row"><span class="n">2</span><div><h3>The owner-bypass trap</h3><p>An owned component's owner can bypass its own rules, so only an ownerless escrow makes the caller rule absolute, proven by the owned-twin test.</p><a class="proof" href="https://github.com/Jayanng/verdict/blob/adejoke/templates/verdict/tests/indirect_form.rs">Owned-twin test &rarr;</a></div></div>
+      <div class="why-row"><span class="n">3</span><div><h3>Epoch hashes as a fairness source</h3><p>The draw commits to a future epoch hash that nobody knows at open, so nobody can grind the panel by opening disputes until they get a friendly jury.</p><a class="proof" href="https://github.com/Jayanng/verdict/blob/adejoke/templates/verdict/src/lib.rs">Court source, draw_jury &rarr;</a></div></div>
+      <div class="why-row"><span class="n">4</span><div><h3>Vaults that belong to their component</h3><p>A vault moves only inside its own component's code, which is why the escrow executes the ruling and the court never touches the money.</p><a class="proof" href="https://github.com/Jayanng/verdict/blob/adejoke/docs/ADAPTER-SPEC.md">Adapter spec &rarr;</a></div></div>
+      <div class="why-row"><span class="n">5</span><div><h3>The engine that enforces all of it</h3><p>Every rule above is enforced by the Ootle engine in tests, not by a promise in a document.</p><a class="proof" href="https://github.com/Jayanng/verdict/actions">Test runs on GitHub &rarr;</a></div></div>
+    </div>
+  </section>
+
+  <section class="section tight">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>Honest limits.</h2>
+        <p class="sec-note">What Verdict does not do, stated on the page, not hidden.</p>
+      </div>
+      <div class="cols-2">
+        <div class="plain-card"><h3>The court never touches the money</h3><p>The escrow's own ownerless code executes rulings. The caller rule is readable on chain.</p></div>
+        <div class="plain-card"><h3>Two of three jurors can collude</h3><p>The unknowable future-epoch draw, bonds, commit-reveal, and the appeal are the mitigations. In a small pool the panel is known after the draw.</p></div>
+        <div class="plain-card"><h3>Evidence is public and off chain</h3><p>Hashes bind content, availability is not guaranteed. Jurors may refuse to arbitrate.</p></div>
+        <div class="plain-card"><h3>No audit</h3><p>Engine tests plus simulation parity tests are the verification standard.</p></div>
+        <div class="plain-card"><h3>The court can always be exited</h3><p>It never holds money hostage.</p></div>
+        <div class="plain-card"><h3>AI-agent-assisted build, disclosed</h3><p>The build used AI assistance, disclosed alongside test counts in the repo and the submission post.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section tight" id="how">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>How it works.</h2>
+        <p class="sec-note">Six steps, from a stuck deal to a ruling the escrow executes.</p>
+      </div>
+      <div class="steps">
+        <div class="step-card"><div class="num">1</div><h3>Open the dispute</h3><p>Either side opens it. The escrow freezes its own vault, and the draw locks to a future epoch.</p></div>
+        <div class="step-card"><div class="num">2</div><h3>Post the evidence</h3><p>Up to 3 items per side, each with a SHA-256 hash, a location, and a byte length. Posted means posted.</p></div>
+        <div class="step-card"><div class="num">3</div><h3>Draw the jury</h3><p>In the locked epoch only, three bonded strangers are drawn from the frozen pool by the future epoch hash.</p></div>
+        <div class="step-card"><div class="num">4</div><h3>Commit, then reveal</h3><p>Each juror commits a hash of their vote and salt, then reveals. A juror who never reveals is replaced.</p></div>
+        <div class="step-card"><div class="num">5</div><h3>The majority rules</h3><p>Pay, refund, or split. A tie goes to appeal with seven jurors, funded by the appellant.</p></div>
+        <div class="step-card"><div class="num">6</div><h3>The escrow executes</h3><p>The court calls execute_ruling once with the outcome and the amounts pair, the escrow moves its own vault and returns both buckets, and the fees come out of the payer bucket before the payer is paid. If quorum fails, the bounded no-ruling fallback closes the dispute and unfreezes the escrow.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section tight" id="faq">
+    <div class="wrap">
+      <div class="faq-layout">
+        <div>
+          <h2>Questions, answered plainly.</h2>
+          <p class="sec-note">If your question is not here, the proof page lets you check the rules yourself: recompute a draw, hash a piece of evidence, or call the settlement method as a stranger and watch it refuse.</p>
+        </div>
+        <div class="faq-card" id="faqCard"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <div class="f-grid">
+      <div>
+        <p class="wordmark">verdict</p>
+        <p>When an Ootle escrow deal goes wrong, three bonded strangers rule it and the loser pays. The court never touches the money.</p>
+      </div>
+      <div class="cols">
+        <div>
+          <h4>Product</h4>
+          <a href="#/">Home</a>
+          <a href="#/app">Disputes</a>
+          <a href="#/open">Open a dispute</a>
+          <a href="#/juror">Become a juror</a>
+        </div>
+        <div>
+          <h4>Proof</h4>
+          <a href="https://github.com/Jayanng/verdict">Code on GitHub</a>
+          <a href="https://github.com/Jayanng/verdict/blob/adejoke/docs/ADAPTER-SPEC.md">Adapter spec</a>
+          <a href="https://github.com/Jayanng/verdict/blob/adejoke/docs/SETTLEMENT.md">Settlement doc</a>
+          <a href="https://github.com/Jayanng/verdict/actions">Engine tests</a>
+        </div>
+      </div>
+    </div>
+    <div class="credits">
+      <span>UI components: <a href="https://rareui.com">Rare UI</a></span>
+      <span>AI-agent-assisted build, disclosed</span>
+      <span>Sample data is labelled on every page. Nothing here is live chain data yet.</span>
+    </div>
+  </div>
+</footer>
+
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

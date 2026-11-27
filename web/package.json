@@ -1,0 +1,14 @@
+{
+  "description": "Verdict web app: landing, disputes, proof pages, and dispute intake. Static site, no build step.",
+  "name": "verdict-web",
+  "private": true,
+  "scripts": {
+    "sample": "node tools/generate-sample-data.mjs",
+    "serve": "python3 -m http.server 8000",
+    "test": "node --test tests/verdict.test.js",
+    "test:parity": "node --test tests/parity.test.js",
+    "test:all": "node --test tests/verdict.test.js tests/parity.test.js"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}
