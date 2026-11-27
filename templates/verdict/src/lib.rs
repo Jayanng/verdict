@@ -712,13 +712,18 @@ mod verdict {
             // split positivity check refuses. The fees are still owed,
             // and the pay outcome routes (0, principal) through the pay
             // bound, which the fees satisfy. The first-round outcome,
-            // which drives the fee distribution, is unchanged.
-            let outcome = if outcome == VOTE_SPLIT && principal - fees == 0 {
+            // which drives the fee distribution, is unchanged. The
+            // conversion applies only to the payout: the adjudicated
+            // outcome stays split, so the appeal jurors who voted
+            // split are still the appeal majority and are not treated
+            // as offenders, and the recorded outcome is the one the
+            // jury actually reached.
+            let execution_outcome = if outcome == VOTE_SPLIT && principal - fees == 0 {
                 VOTE_PAY
             } else {
                 outcome
             };
-            let payee_amount = match outcome {
+            let payee_amount = match execution_outcome {
                 VOTE_PAY => principal.checked_sub(fees).expect("payee amount underflow"),
                 VOTE_REFUND => 0,
                 _ => {
@@ -744,11 +749,18 @@ mod verdict {
                 .checked_sub(payee_amount)
                 .expect("payer amount underflow");
             // Order the ruling: the escrow moves its own vault exactly
-            // once and returns both buckets in one call.
+            // once and returns both buckets in one call. The escrow
+            // sees the payout outcome, which is pay when a split of
+            // nothing was converted; the jurors are accounted by the
+            // adjudicated outcome below.
             let (payee_bucket, mut payer_bucket): (Bucket, Bucket) = ComponentManager::get(escrow)
                 .call(
                     "execute_ruling",
-                    args![dispute_id, outcome, (payee_amount, payer_amount_gross)],
+                    args![
+                        dispute_id,
+                        execution_outcome,
+                        (payee_amount, payer_amount_gross)
+                    ],
                 );
             let payee_moved = payee_bucket
                 .amount()

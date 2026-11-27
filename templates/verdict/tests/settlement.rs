@@ -654,6 +654,88 @@ fn settle_fees_capped_at_small_principal() {
     assert_eq!(dispute_claim(&mut setup, dispute_id, panel[2]), 0);
 }
 
+// ----- degenerate split on appeal keeps the adjudicated outcome -----
+
+#[test]
+fn settle_appeal_split_at_small_principal_keeps_split_jurors() {
+    let mut setup = make_payment_setup(10_000);
+    fund(&mut setup, 10_000);
+    let jurors = register_jurors(&mut setup, 7);
+    let payer_secret = setup.payer.secret.clone();
+    // First round rules pay two to one, so the fees are 10,000, the
+    // whole principal: a split here would route (0, 10,000).
+    let (dispute_id, first_panel) =
+        dispute_with_ruling(&mut setup, &jurors, &[VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    let payer = setup.payer.clone();
+    open_appeal(&mut setup, &payer, dispute_id, APPEAL_FEE);
+    let appeal_panel = draw_appeal_panel(&mut setup, dispute_id);
+    // The appeal majority votes split, four to three. The first-round
+    // refund voter gets a refund vote in the appeal too, so they are
+    // an offender in both rounds; every other appeal juror's vote is
+    // assigned by panel order.
+    let refund_key = first_panel[2];
+    let mut appeal_votes = [VOTE_PAY; 7];
+    let mut split_assigned = 0;
+    let mut pay_assigned = 0;
+    for (i, key) in appeal_panel.iter().enumerate() {
+        if *key == refund_key {
+            appeal_votes[i] = VOTE_REFUND;
+        } else if split_assigned < 4 {
+            appeal_votes[i] = VOTE_SPLIT;
+            split_assigned += 1;
+        } else if pay_assigned < 2 {
+            appeal_votes[i] = VOTE_PAY;
+            pay_assigned += 1;
+        } else {
+            appeal_votes[i] = VOTE_REFUND;
+        }
+    }
+    // The shape is four split, two pay, one refund in every case:
+    // the refund voter takes one slot, and the other six slots fill
+    // with four split and then two pay.
+    rule_appeal_panel(&mut setup, &jurors, dispute_id, &appeal_votes);
+    settle(&mut setup, &payer_secret, dispute_id);
+    // The payout is the pay conversion, (0, 10,000), because the
+    // post-fee principal is empty. But the recorded outcome is the
+    // one the appeal jury actually reached: split, not pay.
+    assert_eq!(dispute_outcome(&mut setup, dispute_id), VOTE_SPLIT);
+    assert_eq!(dispute_payee_amount(&mut setup, dispute_id), 0);
+    assert_eq!(dispute_payer_amount(&mut setup, dispute_id), 0);
+    assert_eq!(dispute_fees_paid(&mut setup, dispute_id), 10_000);
+    assert_eq!(vault_balance(&mut setup), 0);
+    // The four split jurors are the appeal majority: they are not
+    // offenders, so their bonds are untouched, and each is owed a
+    // 5,000 fee plus a 3,750 share of the 15,000 slashed from the
+    // three appeal offenders, 8,750 in total. A split juror who was
+    // also a first-round majority juror adds the 7,500 first-round
+    // claim on top.
+    for (i, key) in appeal_panel.iter().enumerate() {
+        let vote = appeal_votes[i];
+        let first_majority = first_panel[0..2].contains(key);
+        if vote == VOTE_SPLIT {
+            assert_eq!(juror_bond(&mut setup, *key), BOND_FLOOR);
+            let expected = 8_750 + if first_majority { 7_500 } else { 0 };
+            assert_eq!(dispute_claim(&mut setup, dispute_id, *key), expected);
+        } else if vote == VOTE_PAY {
+            assert_eq!(juror_bond(&mut setup, *key), BOND_FLOOR - JUROR_FEE);
+            let expected = if first_majority { 7_500 } else { 0 };
+            assert_eq!(dispute_claim(&mut setup, dispute_id, *key), expected);
+        } else {
+            // Refund voter: an offender in the appeal. The first-round
+            // refund voter is also an offender in the first round, so
+            // they are slashed twice.
+            let expected_bond = if *key == refund_key {
+                BOND_FLOOR - 2 * JUROR_FEE
+            } else {
+                BOND_FLOOR - JUROR_FEE
+            };
+            assert_eq!(juror_bond(&mut setup, *key), expected_bond);
+            let expected = if first_majority { 7_500 } else { 0 };
+            assert_eq!(dispute_claim(&mut setup, dispute_id, *key), expected);
+        }
+    }
+}
+
 // ----- settlement guards -----
 
 #[test]

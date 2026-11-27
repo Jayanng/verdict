@@ -602,16 +602,19 @@ export class SimCourt {
     // equal the principal, the post-fee principal is 0, so a split
     // would route (0, principal), which the escrow's split positivity
     // check refuses. The outcome the escrow sees is pay, the same
-    // conversion the template makes before it orders the ruling.
-    if (outcome === VOTE_SPLIT && dispute.principal - fees === 0n) {
-      outcome = VOTE_PAY;
-    }
+    // conversion the template makes before it orders the ruling. The
+    // conversion applies only to the payout: the adjudicated outcome
+    // stays split, so the appeal jurors who voted split are still
+    // the appeal majority and are not treated as offenders, and the
+    // recorded outcome is the one the jury actually reached.
+    const executionOutcome =
+      outcome === VOTE_SPLIT && dispute.principal - fees === 0n ? VOTE_PAY : outcome;
     // One call returns both buckets: the payee amount and the gross
     // payer amount. The court takes the fees out of the gross payer
     // bucket before paying the payer the net amount.
     const [payeeMoved, payerMovedGross] = escrow.executeRuling(
       disputeId,
-      outcome,
+      executionOutcome,
       [amounts.payeeAmount, amounts.payerAmount],
       this.courtId,
     );

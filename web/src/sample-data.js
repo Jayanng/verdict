@@ -5,44 +5,52 @@
 // no amount moved. Regenerate after any rule change, do not edit by hand.
 
 export const SAMPLE = {
+  "sample": true,
   "jurors": [
     {
+      "sample": true,
       "index": 0,
       "label": "Tester juror 1",
       "key": "8adcf04b67c2f923fa5880f25244bd4d480875a0b6ce9b17683e5d6b41437bd4",
       "bond": 30000
     },
     {
+      "sample": true,
       "index": 1,
       "label": "Tester juror 2",
       "key": "79d559ef6f215028f3cfffb22180c9205a9fa7ab06e2e33c5f0d1ca52778f7e3",
       "bond": 30000
     },
     {
+      "sample": true,
       "index": 2,
       "label": "Tester juror 3",
       "key": "be9c7a473fb3199ec93de864c633fff5abc2e375e0992aaa442114613f6bced2",
       "bond": 30000
     },
     {
+      "sample": true,
       "index": 3,
       "label": "Tester juror 4",
       "key": "1d9429b3acb66e2979ecbb6542a7a62e0a69d85876ceca6af78f97804a581923",
       "bond": 30000
     },
     {
+      "sample": true,
       "index": 4,
       "label": "Tester juror 5",
       "key": "69e808f8368ed254cc1e01a3ad36d9ae8e18b5d5d2eabfb3382b34c52d2982be",
       "bond": 30000
     },
     {
+      "sample": true,
       "index": 5,
       "label": "Tester juror 6",
       "key": "ebdc05af7578287d384d53bd81d45bbdec876da033f92ba1c7022c8083244bda",
       "bond": 30000
     },
     {
+      "sample": true,
       "index": 6,
       "label": "Tester juror 7",
       "key": "febd9b0925df3be7d285594868eac33aa7cd61473dedf6da904763ed5d14ae28",

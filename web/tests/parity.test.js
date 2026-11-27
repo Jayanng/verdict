@@ -403,14 +403,17 @@ describe("settlement matrix", () => {
     assert.equal(0n + 0n + 10000n, 10000n);
   });
 
-  test("a split whose fees equal the principal settles as pay", () => {
+  test("a split whose fees equal the principal pays as pay but records split", () => {
     const court = makeCourt(3);
     const disputeId = openFunded(court, 10000);
     const { panel } = drawAt(court, disputeId);
     rulePanel(court, disputeId, panel, [VOTE_SPLIT, VOTE_SPLIT, VOTE_REFUND]);
     const result = settleAtDeadline(court, disputeId);
+    // The payout is the pay conversion, (0, 10,000), because the
+    // post-fee principal is empty. But the recorded outcome is the
+    // one the jury actually reached: split, not pay.
     assert.deepEqual(result, {
-      outcome: VOTE_PAY,
+      outcome: VOTE_SPLIT,
       payeeAmount: 0n,
       payerAmount: 0n,
       payerAmountGross: 10000n,
@@ -418,6 +421,77 @@ describe("settlement matrix", () => {
       leftoverAppealFee: 0n,
     });
     assert.equal(court.escrows.get("escrow-0").vault, 0n);
+  });
+
+  test("an appeal split at a small principal keeps the split jurors whole", () => {
+    const court = makeCourt(7);
+    const disputeId = openFunded(court, 10000);
+    const { panel } = drawAt(court, disputeId);
+    rulePanel(court, disputeId, panel, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    court.openAppeal(disputeId, "payer", APPEAL_FEE, DRAW_DELAY);
+    const dispute = court.dispute(disputeId);
+    court.setEpoch(dispute.appealDrawEpoch);
+    const { panel: appealPanel } = court.drawAppealJury(disputeId);
+    // The appeal majority votes split, four to three. The first-round
+    // refund voter gets a refund vote in the appeal too, so they are
+    // an offender in both rounds; the other six slots fill with four
+    // split and then two pay.
+    const refundKey = panel[2];
+    const appealVotes = new Array(7).fill(VOTE_PAY);
+    let splitAssigned = 0;
+    let payAssigned = 0;
+    appealPanel.forEach((key, i) => {
+      if (key === refundKey) {
+        appealVotes[i] = VOTE_REFUND;
+      } else if (splitAssigned < 4) {
+        appealVotes[i] = VOTE_SPLIT;
+        splitAssigned += 1;
+      } else if (payAssigned < 2) {
+        appealVotes[i] = VOTE_PAY;
+        payAssigned += 1;
+      } else {
+        appealVotes[i] = VOTE_REFUND;
+      }
+    });
+    ruleAppealPanel(court, disputeId, appealPanel, appealVotes);
+    const result = settleAtDeadline(court, disputeId);
+    // The payout is the pay conversion, (0, 10,000). But the recorded
+    // outcome is the one the appeal jury actually reached: split.
+    assert.deepEqual(result, {
+      outcome: VOTE_SPLIT,
+      payeeAmount: 0n,
+      payerAmount: 0n,
+      payerAmountGross: 10000n,
+      fees: 10000n,
+      leftoverAppealFee: 15000n,
+    });
+    // The four split jurors are the appeal majority: their bonds are
+    // untouched, and each is owed a 5,000 fee plus a 3,750 share of
+    // the 15,000 slashed from the three appeal offenders. A split
+    // juror who was also a first-round majority juror adds the 7,500
+    // first-round claim on top.
+    for (const key of court.jurors.keys()) {
+      const firstShare = panel.slice(0, 2).includes(key) ? 7500n : 0n;
+      const appealIndex = appealPanel.indexOf(key);
+      const vote = appealVotes[appealIndex];
+      if (vote === VOTE_SPLIT) {
+        assert.equal(court.bonds.get(key), BigInt(BOND_FLOOR));
+        assert.equal(
+          court.disputeClaim(disputeId, key),
+          firstShare + 8750n,
+        );
+      } else if (vote === VOTE_PAY) {
+        assert.equal(court.bonds.get(key), BigInt(BOND_FLOOR - JUROR_FEE));
+        assert.equal(court.disputeClaim(disputeId, key), firstShare);
+      } else {
+        const expectedBond =
+          key === refundKey
+            ? BigInt(BOND_FLOOR - 2 * JUROR_FEE)
+            : BigInt(BOND_FLOOR - JUROR_FEE);
+        assert.equal(court.bonds.get(key), expectedBond);
+        assert.equal(court.disputeClaim(disputeId, key), firstShare);
+      }
+    }
   });
 
   test("settle before quorum is rejected", () => {
