@@ -70,7 +70,7 @@ struct Setup {
 
 fn new_test() -> TemplateTest {
     // Cargo runs tests with CWD = the verdict package dir, so the workspace
-    // root is ../.. and both template crates load from there.
+    // root is ../.. and both template crates load from there. The
     TemplateTest::new("../..", ["templates/verdict", "templates/milestone-escrow"])
 }
 
@@ -85,12 +85,11 @@ fn create_verdict(test: &mut TemplateTest, signer: &RistrettoSecretKey) -> Compo
     test.expect_return(0)
 }
 
-/// Create an escrow with the given constructor ("new", "new_owned" or
-/// "new_rule_open"), signed by `creator`. The arbitrator address is the
+/// Create an escrow with the production constructor, signed by
+/// `creator`. The arbitrator address is the
 /// verdict component passed in.
 fn create_escrow(
     test: &mut TemplateTest,
-    ctor: &str,
     arbitrator: ComponentAddress,
     payee_pk: RistrettoPublicKeyBytes,
     creator: &RistrettoSecretKey,
@@ -100,7 +99,7 @@ fn create_escrow(
         test.transaction()
             .call_function(
                 template,
-                ctor,
+                "new",
                 args![arbitrator, payee_pk, MILESTONE_AMOUNTS.to_vec(), DEADLINE],
             )
             .build_and_seal(creator),
@@ -109,14 +108,14 @@ fn create_escrow(
     test.expect_return(0)
 }
 
-fn make_setup(ctor: &str) -> Setup {
+fn make_setup() -> Setup {
     let mut test = new_test();
     let payer = Party::create(&mut test);
     let payee = Party::create(&mut test);
     let stranger = Party::create(&mut test);
     let payer_secret = payer.secret.clone();
     let verdict = create_verdict(&mut test, &payer_secret);
-    let escrow = create_escrow(&mut test, ctor, verdict, payee.pk_bytes(), &payer_secret);
+    let escrow = create_escrow(&mut test, verdict, payee.pk_bytes(), &payer_secret);
     Setup {
         test,
         verdict,
@@ -326,7 +325,7 @@ fn hash_of(byte: u8) -> Hash32 {
 
 #[test]
 fn verdict_settle_moves_escrow_vault_exactly_once() {
-    let mut setup = make_setup("new");
+    let mut setup = make_setup();
     let payer_secret = setup.payer.secret.clone();
     let payee_before = balance(&mut setup.test, &setup.payee);
     let payer_before = balance(&mut setup.test, &setup.payer);
@@ -400,7 +399,7 @@ fn verdict_settle_moves_escrow_vault_exactly_once() {
 
 #[test]
 fn stranger_direct_call_rejected_by_access_rule() {
-    let mut setup = make_setup("new");
+    let mut setup = make_setup();
     let payer_secret = setup.payer.secret.clone();
     let stranger_secret = setup.stranger.secret.clone();
     fund(&mut setup, TOTAL);
@@ -464,132 +463,13 @@ fn stranger_direct_call_rejected_by_access_rule() {
     );
 }
 
-#[test]
-fn stranger_direct_call_rejected_by_in_method_assert() {
-    // Rule-open twin: allow-all rules, so only the in-method caller assert
-    // stands between a stranger and the vault.
-    let mut setup = make_setup("new_rule_open");
-    let stranger_secret = setup.stranger.secret.clone();
-    fund(&mut setup, TOTAL);
-
-    let escrow = setup.escrow;
-    let reason = setup.test.execute_expect_failure(
-        setup
-            .test
-            .transaction()
-            .call_method(escrow, "freeze_for_dispute", args![0u64])
-            .build_and_seal(&stranger_secret),
-        vec![],
-    );
-    eprintln!("assert-layer freeze reject reason: {reason}");
-    // The badge assert fails with the same AccessDenied code as a rule
-    // rejection, but a distinct message: the call "does not carry the
-    // badge" naming the arbitrator. It must NOT be the rule's message
-    // ("Access Denied: call component method ..."), because the twin's
-    // rules are wide open and only the assert stands.
-    assert_reject_reason(&reason, "does not carry the badge");
-    assert!(
-        !reason
-            .to_string()
-            .contains("Access Denied: call component method"),
-        "rule-open twin must not fail on an access rule, got: {reason}"
-    );
-
-    let frozen: bool = setup
-        .test
-        .call_method(setup.escrow, "is_frozen", args![], vec![]);
-    assert!(!frozen);
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), TOTAL);
-
-    // Direct execute_ruling by a stranger: same assert, same rejection.
-    // The escrow is unfrozen here, but the caller assert runs first, so
-    // the rejection is the badge failure, not the frozen guard.
-    let reason = setup.test.execute_expect_failure(
-        setup
-            .test
-            .transaction()
-            .call_method(
-                escrow,
-                "execute_ruling",
-                args![0u64, VOTE_PAY, (PAYEE_SHARE, PAYER_SHARE)],
-            )
-            .build_and_seal(&stranger_secret),
-        vec![],
-    );
-    eprintln!("assert-layer ruling reject reason: {reason}");
-    assert_reject_reason(&reason, "does not carry the badge");
-    assert!(
-        !reason
-            .to_string()
-            .contains("Access Denied: call component method"),
-        "rule-open twin must not fail on an access rule, got: {reason}"
-    );
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), TOTAL);
-}
-
 // ----- (c) owned-twin positive control -----
-
-#[test]
-fn owned_twin_owner_bypasses_caller_rule() {
-    // Owned twin: the payer created it, so the payer is its owner. The
-    // owner bypasses the caller-component rule, and the twin's assert is
-    // off, so the direct calls must reach the method body. A direct
-    // execute_ruling that succeeds would return two buckets the test
-    // transaction cannot consume, so the bypass for execute_ruling is
-    // proven by a call that reaches the body and is refused there, for
-    // the mismatched dispute id, instead of by the access rule.
-    let mut setup = make_setup("new_owned");
-    let payer_secret = setup.payer.secret.clone();
-    fund(&mut setup, TOTAL);
-
-    let escrow = setup.escrow;
-    setup.test.execute_expect_success(
-        setup
-            .test
-            .transaction()
-            .call_method(escrow, "freeze_for_dispute", args![0u64])
-            .build_and_seal(&payer_secret),
-        vec![],
-    );
-    let frozen: bool = setup
-        .test
-        .call_method(setup.escrow, "is_frozen", args![], vec![]);
-    assert!(frozen, "owner bypass must let the owner freeze directly");
-
-    // Owner calls execute_ruling directly with the wrong dispute id:
-    // the rule lets the owner through, and the method body refuses the
-    // mismatched id. A rule rejection would read "Access Denied".
-    let reason = setup.test.execute_expect_failure(
-        setup
-            .test
-            .transaction()
-            .call_method(
-                escrow,
-                "execute_ruling",
-                args![1u64, VOTE_PAY, (PAYEE_SHARE, PAYER_SHARE)],
-            )
-            .build_and_seal(&payer_secret),
-        vec![],
-    );
-    assert_reject_reason(&reason, "does not match");
-    assert!(
-        !reason
-            .to_string()
-            .contains("Access Denied: call component method"),
-        "owner bypass must pass the access rule, got: {reason}"
-    );
-    assert_eq!(vault_balance(&mut setup.test, setup.escrow), TOTAL);
-    let executed: bool = setup
-        .test
-        .call_method(setup.escrow, "ruling_executed", args![], vec![]);
-    assert!(!executed);
-}
 
 #[test]
 fn ownerless_twin_refuses_same_direct_call() {
     // Same direct calls as the owned twin, same signer, but the escrow is
     // ownerless: no owner-bypass path exists, so the rule refuses.
-    let mut setup = make_setup("new");
+    let mut setup = make_setup();
     let payer_secret = setup.payer.secret.clone();
     fund(&mut setup, TOTAL);
 
@@ -640,7 +520,7 @@ fn template_reads_current_epoch_hash() {
 
 #[test]
 fn future_epoch_draw_commitment_enforced() {
-    let mut setup = make_setup("new");
+    let mut setup = make_setup();
     let payer_secret = setup.payer.secret.clone();
     fund(&mut setup, TOTAL);
 
@@ -710,13 +590,7 @@ fn future_epoch_draw_commitment_enforced() {
     // epoch 4; drawing it at epoch 3 (before E*) fails, proving the
     // window is per-dispute. One escrow holds one dispute.
     let payee_pk = setup.payee.pk_bytes();
-    let escrow2 = create_escrow(
-        &mut setup.test,
-        "new",
-        setup.verdict,
-        payee_pk,
-        &payer_secret,
-    );
+    let escrow2 = create_escrow(&mut setup.test, setup.verdict, payee_pk, &payer_secret);
     fund_on(&mut setup, escrow2, TOTAL);
     let dispute2 = open_dispute_on(&mut setup, escrow2, &payer_secret);
     let draw_epoch2: u64 =

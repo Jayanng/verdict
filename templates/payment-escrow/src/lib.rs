@@ -18,15 +18,14 @@
 //   3. OwnerRule::None on the production constructor, so no owner path can
 //      bypass the rule.
 //
-// Verification constructors (used by the engine tests to isolate the
-// layers). Test fixtures only: never create a live escrow holding real
-// funds with these. A live escrow always uses `new`, which is ownerless,
-// with the caller rule and the in-method assert on.
-//   - `new_owned`: OwnerRule::OwnedBySigner, caller rule, assert OFF. The
-//     owned twin: proves the owner bypasses the caller rule.
-//   - `new_rule_open`: OwnerRule::None, allow-all rules, assert ON. The
-//     assert-only twin: proves the in-method assert rejects a stranger
-//     even when the access rule would allow the call.
+// The production constructor `new` is the only constructor. There are no
+// verification constructors: the template's `#[template]` macro generates
+// a dispatcher arm for every public function, and it does not respect
+// `#[cfg]`, so a test-only constructor gated by a cargo feature would
+// still be dispatched in a production build and break it. The escrow's
+// own guards (frozen, dispute id, amounts, ruling shape) are defense in
+// depth behind the court, verified by audit, and the end-to-end tests
+// prove legitimate rulings pass them.
 //
 // Deadline semantics, by method. The deadline is an epoch, set at creation,
 // and must be after the creation epoch. Only refund is deadline-limited in
@@ -80,6 +79,18 @@ mod payment_escrow {
     const OUTCOME_SPLIT: u64 = 2;
     const OUTCOME_NO_RULING: u64 = 4;
 
+    /// The largest juror fee total the court can take from the
+    /// principal: one fee per juror in the first-round majority, and
+    /// the first-round panel has three jurors, so at most three fees.
+    /// The court pays appeal jurors from the appeal fee, not from the
+    /// principal, so the principal never funds more than this. This
+    /// must stay equal to the court template's PANEL_SIZE * JUROR_FEE
+    /// (3 * 5,000). The escrow uses it to bound the payer's gross
+    /// amount on a pay ruling, which is exactly the fee, and to bound
+    /// the split, where the payer's gross is the fee plus the payer's
+    /// half of the post-fee principal.
+    const MAX_PRINCIPAL_FEE: u64 = 15_000;
+
     pub struct PaymentEscrow {
         /// The court component named at creation. Immutable, never changed.
         arbitrator: ComponentAddress,
@@ -123,71 +134,33 @@ mod payment_escrow {
 
     impl PaymentEscrow {
         /// Production form: ownerless, caller rule, in-method assert on.
+        /// This is the only constructor. It takes no configuration: the
+        /// owner rule, the assert, and the access rules are fixed here,
+        /// so no caller can create a weakened escrow.
         pub fn new(
             arbitrator: ComponentAddress,
             payee: RistrettoPublicKeyBytes,
             amount: u64,
             deadline: u64,
         ) -> Component<Self> {
-            Self::create(
-                arbitrator,
-                payee,
-                amount,
-                deadline,
-                OwnerRule::None,
-                true,
-                false,
-            )
+            let state = Self::build_state(arbitrator, payee, amount, deadline);
+            let rules = AccessRules::allow_all()
+                .add_method_rule("freeze_for_dispute", rule!(caller_component(arbitrator)))
+                .add_method_rule("execute_ruling", rule!(caller_component(arbitrator)));
+            Component::new(state)
+                .with_access_rules(rules)
+                .with_owner_rule(OwnerRule::None)
+                .create()
         }
 
-        /// Owned twin: the creator owns the component, so the
-        /// owner bypass applies to the caller rule. Assert off so the
-        /// bypass is observable instead of masked by the assert.
-        pub fn new_owned(
+        /// Validate the creation inputs and build the escrow state.
+        /// The in-method caller assert is on.
+        fn build_state(
             arbitrator: ComponentAddress,
             payee: RistrettoPublicKeyBytes,
             amount: u64,
             deadline: u64,
-        ) -> Component<Self> {
-            Self::create(
-                arbitrator,
-                payee,
-                amount,
-                deadline,
-                OwnerRule::OwnedBySigner,
-                false,
-                false,
-            )
-        }
-
-        /// Assert-only twin: ownerless, rules wide open, the
-        /// in-method caller assert is the only check.
-        pub fn new_rule_open(
-            arbitrator: ComponentAddress,
-            payee: RistrettoPublicKeyBytes,
-            amount: u64,
-            deadline: u64,
-        ) -> Component<Self> {
-            Self::create(
-                arbitrator,
-                payee,
-                amount,
-                deadline,
-                OwnerRule::None,
-                true,
-                true,
-            )
-        }
-
-        fn create(
-            arbitrator: ComponentAddress,
-            payee: RistrettoPublicKeyBytes,
-            amount: u64,
-            deadline: u64,
-            owner_rule: OwnerRule,
-            assert_caller: bool,
-            rules_open: bool,
-        ) -> Component<Self> {
+        ) -> Self {
             let payer = CallerContext::transaction_signer_public_key();
             assert!(
                 payee != payer,
@@ -198,7 +171,7 @@ mod payment_escrow {
                 deadline > Consensus::current_epoch(),
                 "deadline must be after the current epoch"
             );
-            let state = Self {
+            Self {
                 arbitrator,
                 payer,
                 payee,
@@ -214,19 +187,8 @@ mod payment_escrow {
                 ruling_executed: false,
                 cancelled: false,
                 refunded: false,
-                assert_caller,
-            };
-            let rules = if rules_open {
-                AccessRules::allow_all()
-            } else {
-                AccessRules::allow_all()
-                    .add_method_rule("freeze_for_dispute", rule!(caller_component(arbitrator)))
-                    .add_method_rule("execute_ruling", rule!(caller_component(arbitrator)))
-            };
-            Component::new(state)
-                .with_access_rules(rules)
-                .with_owner_rule(owner_rule)
-                .create()
+                assert_caller: true,
+            }
         }
 
         /// Fund the escrow. Only the payer may fund, before the deadline,
@@ -424,6 +386,38 @@ mod payment_escrow {
                 total == balance,
                 "ruling amounts must equal the vault balance"
             );
+            // The pay and split cells are validated by shape, after
+            // conservation. The court computes the exact fee, but the
+            // escrow knows the fee's bounds, so a ruling that
+            // contradicts them is refused even though it conserves:
+            //   - Pay: the payer's gross amount is exactly the juror
+            //     fee, which is at most MAX_PRINCIPAL_FEE. A pay that
+            //     hands the whole principal to the payer is a refund
+            //     wearing a pay outcome, and it is refused.
+            //   - Split: the payer's gross is the fee plus the payer's
+            //     half of the post-fee principal, and the payee gets
+            //     the other half, rounded up. So the payee is never
+            //     more than one micro-Tari above the payer, and the
+            //     payer is never more than the maximum fee above the
+            //     payee. A split that hands everything to one side is
+            //     refused. The saturating subtraction keeps the
+            //     comparison from overflowing on a u64 boundary.
+            if outcome == OUTCOME_PAY {
+                assert!(
+                    payer_amount <= MAX_PRINCIPAL_FEE,
+                    "pay fee exceeds the maximum juror fee total"
+                );
+            }
+            if outcome == OUTCOME_SPLIT {
+                assert!(
+                    payee_amount.saturating_sub(payer_amount) <= 1,
+                    "split payee exceeds the payer by more than one micro-Tari"
+                );
+                assert!(
+                    payer_amount.saturating_sub(payee_amount) <= MAX_PRINCIPAL_FEE,
+                    "split payer exceeds the payee by more than the maximum juror fee total"
+                );
+            }
             self.ruling_executed = true;
             self.frozen = false;
             self.ruled_amount = self

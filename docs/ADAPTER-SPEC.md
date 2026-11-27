@@ -43,6 +43,19 @@ escrow untouched:
   exactly.
 - A refund ruling requires the payee amount to be 0.
 - A no-ruling ruling requires the payee amount to be 0.
+- A pay ruling requires the payer amount to be at most the maximum
+  juror fee total (three fees, 15,000), because the payer's gross
+  amount on a pay is exactly the fee. A pay that hands the whole
+  principal to the payer is refused.
+- A split ruling requires the payee amount to be at most one
+  micro-Tari above the payer amount, and the payer amount to be at
+  most the maximum juror fee total above the payee amount, because
+  the payer's gross is the fee plus the payer's half. A split that
+  hands everything to one side is refused.
+
+The exact fee is the court's responsibility: the court computes it
+from the majority count, and the escrow validates the shape of the
+amounts against the fee's bounds, not the fee itself.
 
 ## Approval deposits to the payee
 
@@ -77,6 +90,14 @@ milestone amounts and the deadline epoch; for a single-payment escrow, the
 payment amount and the deadline epoch. The constructor rejects a deal with
 no milestones, a non-positive amount, a milestone total that overflows, a payee
 who is the payer, and a deadline that is not after the creation epoch.
+
+The production constructor is the only constructor. There are no
+verification constructors: the template's `#[template]` macro generates
+a dispatcher arm for every public function and does not respect
+`#[cfg]`, so a test-only constructor cannot be hidden from a
+production build. The escrow's own guards are defense in depth behind
+the court, verified by audit, and the end-to-end tests prove
+legitimate rulings pass them.
 
 ## Gating
 
