@@ -442,9 +442,13 @@ mod milestone_escrow {
             // escrow knows the fee's bounds, so a ruling that
             // contradicts them is refused even though it conserves:
             //   - Pay: the payer's gross amount is exactly the juror
-            //     fee, which is at most MAX_PRINCIPAL_FEE. A pay that
-            //     hands the whole principal to the payer is a refund
-            //     wearing a pay outcome, and it is refused.
+            //     fee, which is at most MAX_PRINCIPAL_FEE. A pay
+            //     whose payer amount exceeds that total is refused,
+            //     because it hands the payer more than the fee. When
+            //     the whole principal is at most the fee total, the
+            //     payer's gross is exactly the fee, the court takes
+            //     it as fees, and the payer nets nothing, so the pay
+            //     executes.
             //   - Split: the payer's gross is the fee plus the payer's
             //     half of the post-fee principal, and the payee gets
             //     the other half, rounded up. So the payee is never

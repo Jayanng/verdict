@@ -45,8 +45,11 @@ escrow untouched:
 - A no-ruling ruling requires the payee amount to be 0.
 - A pay ruling requires the payer amount to be at most the maximum
   juror fee total (three fees, 15,000), because the payer's gross
-  amount on a pay is exactly the fee. A pay that hands the whole
-  principal to the payer is refused.
+  amount on a pay is exactly the fee. A pay whose payer amount
+  exceeds that total is refused. When the whole principal is at
+  most the fee total, the payer's gross is exactly the fee, the
+  court takes it as fees, and the payer nets nothing, so the pay
+  executes.
 - A split ruling requires both amounts to be positive, the payee
   amount to be at most one micro-Tari above the payer amount, and
   the payer amount to be at most the maximum juror fee total above
