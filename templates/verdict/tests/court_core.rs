@@ -305,6 +305,17 @@ fn commit_vote(setup: &mut Setup, juror: &Party, dispute_id: u64, commitment: Ha
 }
 
 fn reveal_vote(setup: &mut Setup, juror: &Party, dispute_id: u64, vote: u64, salt: Hash32) {
+    // Reveals only happen after the commit window ends, at the reveal
+    // deadline: the commit deadline is draw + 1 and the reveal deadline
+    // is draw + 2, so the reveal epoch is strictly after the commit
+    // deadline and no later than the reveal deadline.
+    let deadline: u64 = setup.test.call_method(
+        setup.verdict,
+        "dispute_reveal_deadline",
+        args![dispute_id],
+        vec![],
+    );
+    set_epoch(&mut setup.test, deadline);
     let verdict = setup.verdict;
     let juror_secret = juror.secret.clone();
     setup.test.execute_expect_success(
@@ -684,6 +695,15 @@ fn reveal_not_matching_commit_rejected() {
     let salt = hash_of(0x54);
     let commitment = vote_commitment(VOTE_PAY, salt, dispute_id, juror.pk_bytes());
     commit_vote(&mut setup, juror, dispute_id, commitment);
+    // The reveals must happen at the reveal deadline, after the commit
+    // window ends, so the commitment mismatch is what rejects them.
+    let deadline: u64 = setup.test.call_method(
+        setup.verdict,
+        "dispute_reveal_deadline",
+        args![dispute_id],
+        vec![],
+    );
+    set_epoch(&mut setup.test, deadline);
     let verdict = setup.verdict;
     let juror_secret = juror.secret.clone();
     // Revealing a different vote with the same salt does not match.

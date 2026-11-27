@@ -47,11 +47,15 @@ escrow untouched:
   juror fee total (three fees, 15,000), because the payer's gross
   amount on a pay is exactly the fee. A pay that hands the whole
   principal to the payer is refused.
-- A split ruling requires the payee amount to be at most one
-  micro-Tari above the payer amount, and the payer amount to be at
-  most the maximum juror fee total above the payee amount, because
-  the payer's gross is the fee plus the payer's half. A split that
-  hands everything to one side is refused.
+- A split ruling requires both amounts to be positive, the payee
+  amount to be at most one micro-Tari above the payer amount, and
+  the payer amount to be at most the maximum juror fee total above
+  the payee amount, because the payer's gross is the fee plus the
+  payer's half. A split that hands everything to one side is refused:
+  the bounds alone still allow (0, principal), so the positivity
+  check closes that gap. When the fees equal the principal, the
+  court rules pay instead of split, so the split never sees an
+  empty post-fee principal.
 
 The exact fee is the court's responsibility: the court computes it
 from the majority count, and the escrow validates the shape of the
@@ -60,12 +64,14 @@ amounts against the fee's bounds, not the fee itself.
 ## Approval deposits to the payee
 
 When the payer approves a milestone or a payment, the escrow deposits
-the released slice straight into the payee's account itself. The payer
-passes the payee's account address when calling `approve`, and the escrow
-does the deposit. The caller never holds the released bucket, so a payer
-cannot approve a milestone and then misroute the money to themselves while
-the milestone is permanently marked released. Cancel and refund still
-return a bucket to the payer, because the payer is the rightful recipient
+the released slice straight into the payee's account itself. `approve`
+takes no account address: the escrow derives the payee's account from
+the payee key stored at creation, the same derivation the court uses
+for settlement payouts, and does the deposit. The caller never holds
+the released bucket and never names the destination, so a payer cannot
+approve a milestone and then misroute the money to themselves while the
+milestone is permanently marked released. Cancel and refund still return
+a bucket to the payer, because the payer is the rightful recipient
 there.
 
 ## Freezing needs funds at stake
@@ -118,17 +124,6 @@ in-method assert, and the ownerless escrow.
    owner-bypass path exists that could rewrite the rules or drain the
    vault. The verified public statement is: the only component whose calls
    the escrow's settlement method accepts is the court.
-
-## Verification constructors (test only, never ship)
-
-The templates also expose `new_owned` and `new_rule_open`. These exist
-only so the engine tests can isolate the security layers: the owned twin
-proves the owner bypasses the caller rule, and the rule-open twin proves
-the in-method assert rejects a stranger even when the access rule would
-allow the call. They are test fixtures, not production constructors. A
-real escrow holding real funds must always be created with `new`, which
-is ownerless, with the caller rule and the in-method assert on. Never
-create a live escrow with `new_owned` or `new_rule_open`.
 
 ## Deadline and freeze rules
 

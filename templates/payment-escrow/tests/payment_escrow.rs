@@ -184,12 +184,11 @@ fn deliver(setup: &mut Setup) {
 fn approve(setup: &mut Setup) {
     let payer_secret = setup.payer.secret.clone();
     let escrow = setup.escrow;
-    let payee_account = setup.payee.account;
     setup.test.execute_expect_success(
         setup
             .test
             .transaction()
-            .call_method(escrow, "approve", args![payee_account])
+            .call_method(escrow, "approve", args![])
             .build_and_seal(&payer_secret),
         vec![],
     );
@@ -253,7 +252,8 @@ fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64) {
         args![dispute_id],
         vec![],
     );
-    set_epoch(&mut setup.test, deadline);
+    // Settle requires an epoch strictly after the reveal deadline.
+    set_epoch(&mut setup.test, deadline + 1);
     let verdict = setup.verdict;
     setup.test.execute_expect_success(
         setup
@@ -344,6 +344,7 @@ fn rule_dispute(setup: &mut Setup, jurors: &[Party], dispute_id: u64, votes: [u6
             )
         })
         .collect();
+    let mut revealed: Vec<(RistrettoSecretKey, u64, Hash32)> = Vec::new();
     for (i, key) in panel.iter().enumerate() {
         let juror = jurors
             .iter()
@@ -360,15 +361,17 @@ fn rule_dispute(setup: &mut Setup, jurors: &[Party], dispute_id: u64, votes: [u6
                 .build_and_seal(&juror_secret),
             vec![],
         );
+        revealed.push((juror_secret, votes[i], salt));
+    }
+    // The commit window ends at draw + 1, so reveals happen at draw + 2,
+    // the reveal deadline: after the commit window ends, before it closes.
+    set_epoch(&mut setup.test, DRAW_DELAY + 2);
+    for (juror_secret, vote, salt) in revealed {
         setup.test.execute_expect_success(
             setup
                 .test
                 .transaction()
-                .call_method(
-                    setup.verdict,
-                    "reveal_vote",
-                    args![dispute_id, votes[i], salt],
-                )
+                .call_method(setup.verdict, "reveal_vote", args![dispute_id, vote, salt])
                 .build_and_seal(&juror_secret),
             vec![],
         );
@@ -509,8 +512,7 @@ fn partial_funding_blocks_approval() {
     fund(&mut setup, 100_000);
     deliver(&mut setup);
     let payer_secret = setup.payer.secret.clone();
-    let payee_account = setup.payee.account;
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
     assert_reject_reason(&reason, "not funded");
     assert_eq!(vault_balance(&mut setup.test, setup.escrow), 100_000);
 }
@@ -522,8 +524,7 @@ fn approve_before_delivery_fails() {
     let mut setup = make_setup();
     fund(&mut setup, AMOUNT);
     let payer_secret = setup.payer.secret.clone();
-    let payee_account = setup.payee.account;
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
     assert_reject_reason(&reason, "not delivered");
 }
 
@@ -533,8 +534,7 @@ fn approve_only_payer_can_approve() {
     fund(&mut setup, AMOUNT);
     deliver(&mut setup);
     let payee_secret = setup.payee.secret.clone();
-    let payee_account = setup.payee.account;
-    let reason = call_expect_failure(&mut setup, &payee_secret, "approve", args![payee_account]);
+    let reason = call_expect_failure(&mut setup, &payee_secret, "approve", args![]);
     assert_reject_reason(&reason, "only the payer can approve");
 }
 
@@ -579,8 +579,7 @@ fn second_approval_fails() {
     deliver(&mut setup);
     approve(&mut setup);
     let payer_secret = setup.payer.secret.clone();
-    let payee_account = setup.payee.account;
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
     assert_reject_reason(&reason, "already released");
 }
 
@@ -687,10 +686,9 @@ fn actions_after_cancel_fail() {
     cancel(&mut setup);
     let payer_secret = setup.payer.secret.clone();
     let payee_secret = setup.payee.secret.clone();
-    let payee_account = setup.payee.account;
     let reason = call_expect_failure(&mut setup, &payee_secret, "mark_delivered", args![]);
     assert_reject_reason(&reason, "cancelled");
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
     assert_reject_reason(&reason, "cancelled");
     let reason = call_expect_failure(&mut setup, &payer_secret, "refund", args![]);
     assert_reject_reason(&reason, "cancelled");
@@ -704,10 +702,9 @@ fn actions_after_refund_fail() {
     refund(&mut setup);
     let payer_secret = setup.payer.secret.clone();
     let payee_secret = setup.payee.secret.clone();
-    let payee_account = setup.payee.account;
     let reason = call_expect_failure(&mut setup, &payee_secret, "mark_delivered", args![]);
     assert_reject_reason(&reason, "refunded");
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
     assert_reject_reason(&reason, "refunded");
     let reason = call_expect_failure(&mut setup, &payer_secret, "cancel", args![]);
     assert_reject_reason(&reason, "refunded");
@@ -730,8 +727,7 @@ fn approve_after_deadline_fails() {
     deliver(&mut setup);
     set_epoch(&mut setup.test, DEADLINE);
     let payer_secret = setup.payer.secret.clone();
-    let payee_account = setup.payee.account;
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
     assert_reject_reason(&reason, "deadline");
 }
 
@@ -781,10 +777,9 @@ fn freeze_blocks_state_changes() {
     let payee_secret = setup.payee.secret.clone();
     open_dispute(&mut setup, &payer_secret);
     assert!(is_frozen(&mut setup));
-    let payee_account = setup.payee.account;
     let reason = call_expect_failure(&mut setup, &payee_secret, "mark_delivered", args![]);
     assert_reject_reason(&reason, "frozen");
-    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![payee_account]);
+    let reason = call_expect_failure(&mut setup, &payer_secret, "approve", args![]);
     assert_reject_reason(&reason, "frozen");
     let reason = call_expect_failure(&mut setup, &payer_secret, "cancel", args![]);
     assert_reject_reason(&reason, "frozen");

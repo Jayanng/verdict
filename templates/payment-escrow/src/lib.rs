@@ -127,9 +127,6 @@ mod payment_escrow {
         cancelled: bool,
         /// True once the payer has refunded the unreleased amount.
         refunded: bool,
-        /// When false the in-method caller assert is skipped
-        /// (used by the owned twin so the owner bypass is observable).
-        assert_caller: bool,
     }
 
     impl PaymentEscrow {
@@ -187,7 +184,6 @@ mod payment_escrow {
                 ruling_executed: false,
                 cancelled: false,
                 refunded: false,
-                assert_caller: true,
             }
         }
 
@@ -235,12 +231,38 @@ mod payment_escrow {
             self.delivered = true;
         }
 
+        /// The account address of a public key, derived the same way
+        /// the engine derives an account created for that key: the
+        /// Blake2b-256 hash, under the engine component-address domain,
+        /// of the account template address (all bytes) and the key.
+        /// The engine hashes the template address and the key in their
+        /// Borsh form, so the key carries its 4-byte little-endian
+        /// length prefix. Approve derives the payee account from the
+        /// stored payee key with this function, so the payout account
+        /// is never caller-supplied and a payer cannot misroute a
+        /// release to themselves.
+        fn account_address(key: RistrettoPublicKeyBytes) -> ComponentAddress {
+            // Domain tag: the 8-byte little-endian length 41, then
+            // "com.tari.ootle.engine", ".v", "0", ".", "ComponentAddress".
+            const DOMAIN_TAG: &[u8] =
+                b"\x29\x00\x00\x00\x00\x00\x00\x00com.tari.ootle.engine.v0.ComponentAddress";
+            let hash = intrinsics::hash_blake2b_parts(&[
+                DOMAIN_TAG,
+                &[0u8; 32],
+                &32u32.to_le_bytes(),
+                key.as_ref(),
+            ]);
+            ComponentAddress::new(tari_template_lib::types::ObjectKey::from_array(
+                hash.leading_bytes::<32>(),
+            ))
+        }
+
         /// Approve the delivery. Only the payer may approve, before the
         /// deadline, while the agreement is open. Approval releases the
         /// full payment amount to the payee's account, and the payment
         /// must be funded before it can move. The escrow deposits the
         /// amount itself, so the caller cannot misroute it.
-        pub fn approve(&mut self, payee_account: ComponentAddress) {
+        pub fn approve(&mut self) {
             self.assert_open();
             self.assert_before_deadline("approval is closed after the deadline");
             assert!(
@@ -257,6 +279,7 @@ mod payment_escrow {
             assert!(self.amount <= balance, "payment is not funded yet");
             self.released = true;
             let bucket = self.vault.withdraw(Amount::from_u64(self.amount));
+            let payee_account = Self::account_address(self.payee);
             ComponentManager::get(payee_account).invoke("deposit", args![bucket]);
         }
 
@@ -409,6 +432,11 @@ mod payment_escrow {
                 );
             }
             if outcome == OUTCOME_SPLIT {
+                // A split must pay both sides: neither amount may be 0.
+                // The bounds above alone still allow (0, principal),
+                // which hands everything to one side.
+                assert!(payee_amount > 0, "split must pay the payee");
+                assert!(payer_amount > 0, "split must pay the payer");
                 assert!(
                     payee_amount.saturating_sub(payer_amount) <= 1,
                     "split payee exceeds the payer by more than one micro-Tari"
@@ -518,11 +546,9 @@ mod payment_escrow {
         }
 
         fn assert_arbitrator(&self) {
-            if self.assert_caller {
-                CallerContext::assert_badge_in_scope(&NonFungibleAddress::caller_component_badge(
-                    self.arbitrator,
-                ));
-            }
+            CallerContext::assert_badge_in_scope(&NonFungibleAddress::caller_component_badge(
+                self.arbitrator,
+            ));
         }
     }
 }

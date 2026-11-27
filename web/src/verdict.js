@@ -8,6 +8,11 @@
 export const PANEL_SIZE = 3;
 export const APPEAL_PANEL_SIZE = 7;
 export const JUROR_FEE = 5000;
+// The most juror fees that can ever come out of the principal: the
+// first-round panel is three jurors, and only the first-round majority
+// is paid from the principal. The escrow validates pay and split rulings
+// against this bound.
+export const MAX_PRINCIPAL_FEE = JUROR_FEE * PANEL_SIZE;
 export const BOND_FLOOR = 2 * JUROR_FEE * PANEL_SIZE;
 export const APPEAL_FEE = 35000;
 export const SLASH = 5000;
@@ -308,6 +313,14 @@ export function settleAmounts(principal, outcome, majorityCount) {
     return done(0n, p);
   }
   if (outcome === VOTE_SPLIT) {
+    // A split of nothing is a pay, not a split: when the juror fees
+    // equal the principal, the post-fee principal is 0, so a split
+    // would route (0, principal), which the escrow's split positivity
+    // check refuses. The pay outcome routes (0, principal) through
+    // the pay bound, which the fees satisfy.
+    if (postFee === 0n) {
+      return done(0n, fees);
+    }
     const [payeeAmount, payerAmountNet] = splitLargestRemainder(postFee, [1n, 1n]);
     return done(payeeAmount, payerAmountNet + fees);
   }

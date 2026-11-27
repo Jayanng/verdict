@@ -61,9 +61,11 @@ The panel derivation hashes the draw domain with the draw hash, the
 round nonce, the dispute id, and the slot: for each slot, SHA-256 over
 (draw hash, domain, round, dispute id, slot), the first eight bytes
 little-endian, modulo the pool length, probing forward to the next free
-juror. The two rounds draw independently from the same hash: a domain
-step changes every slot hash, so no round step can reproduce the other
-round's panel. The derivation makes no claim that the two panels can
+juror. The two rounds draw independently from the same hash: the domain
+and round are separate fixed-width hash inputs, so changing the round
+cannot cancel a domain change in the input encoding. Distinct inputs
+may nevertheless produce matching selections, so the construction does
+not guarantee disjoint panels. The derivation makes no claim that the two panels can
 never share a juror: with the same pool, the same juror can be drawn in
 both rounds, and that is fine, since each round votes and is paid
 separately.
@@ -136,8 +138,10 @@ jurors split the capped fees by largest remainder. Costs never exceed the
 principal.
 
 Settle runs only once the reveal window has passed. The current epoch must
-be at or past the first-round reveal deadline, and, when the dispute is
-under appeal, at or past the appeal reveal deadline too. A juror who still
+be strictly after the first-round reveal deadline, and, when the dispute
+is under appeal, strictly after the appeal reveal deadline too. A reveal
+is still valid in the deadline epoch itself, so a settle in that epoch
+could slash a juror whose reveal was still timely. A juror who still
 has time to reveal is never counted among the offenders and slashed by an
 early settle: settle cannot run early at all.
 
@@ -199,9 +203,9 @@ did not reveal are recorded as failed. The panel, the commits, and the
 reveals are cleared, the round nonce advances, and the next draw executes
 only in the new locked epoch. One replacement per round.
 
-Only a party to the dispute, the payer or the payee, can call a
-replacement, and only once the reveal window has passed: the draw epoch
-plus two epochs. A replacement can never land while honest jurors are
+Anyone can call a replacement, and only once the reveal window has
+passed: the current epoch must be strictly after the reveal deadline,
+the draw epoch plus two epochs. A replacement can never land while honest jurors are
 still within their time to reveal. The deadline is stored on the dispute
 at draw time and is readable on chain.
 

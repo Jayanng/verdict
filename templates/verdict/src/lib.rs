@@ -467,10 +467,10 @@ mod verdict {
         /// Record a failed round and commit a new future epoch for the
         /// replacement draw. Allowed once per dispute, only when the drawn
         /// round cannot produce a ruling: some drawn juror has not
-        /// revealed, and no outcome holds a majority of the reveals. Only
-        /// a party to the dispute can call it, and only once the reveal
-        /// window has passed, so no replacement can land while honest
-        /// jurors are still within their time to reveal. The delay must
+        /// revealed, and no outcome holds a majority of the reveals.
+        /// Anyone can call it, and only once the reveal window has
+        /// passed, so no replacement can land while honest jurors are
+        /// still within their time to reveal. The delay must
         /// be at least one epoch, so the replacement draw still uses a
         /// future epoch hash. The jurors who did not reveal are recorded
         /// as failed; they are slashed when the dispute settles or
@@ -482,16 +482,10 @@ mod verdict {
                 draw_delay >= MIN_DRAW_DELAY,
                 "draw delay must be at least one epoch"
             );
-            let signer = CallerContext::transaction_signer_public_key();
-            let escrow = self.dispute(dispute_id).escrow;
-            let payer: RistrettoPublicKeyBytes =
-                ComponentManager::get(escrow).call("payer", args![]);
-            let payee: RistrettoPublicKeyBytes =
-                ComponentManager::get(escrow).call("payee", args![]);
-            assert!(
-                signer == payer || signer == payee,
-                "only a party to the dispute can replace the jury"
-            );
+            // Permissionless: anyone can trigger a replacement once the
+            // reveal window has passed. An incomplete round must not
+            // depend on a party submitting a transaction to advance, or
+            // the dispute can freeze forever when neither party acts.
             {
                 let dispute = self.dispute(dispute_id);
                 assert!(dispute.drawn, "jury not drawn for this dispute");
@@ -500,7 +494,7 @@ mod verdict {
                 assert!(!dispute.appealed, "dispute is under appeal");
                 assert!(!dispute.replacement_used, "replacement already used");
                 assert!(
-                    Consensus::current_epoch() >= dispute.reveal_deadline,
+                    Consensus::current_epoch() > dispute.reveal_deadline,
                     "reveal window has not passed yet"
                 );
                 assert!(
@@ -575,6 +569,13 @@ mod verdict {
             assert!(dispute.drawn, "jury not drawn for this dispute");
             assert!(!dispute.settled, "dispute already settled");
             assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
+            // The commit window must have ended before any reveal is
+            // accepted, so no juror can watch another juror's revealed
+            // vote and then commit an adaptive vote of their own.
+            assert!(
+                Consensus::current_epoch() > dispute.commit_deadline,
+                "commit window has not ended"
+            );
             assert!(
                 Consensus::current_epoch() <= dispute.reveal_deadline,
                 "reveal window has passed"
@@ -639,12 +640,12 @@ mod verdict {
                 // be slashed for not revealing: a juror inside their
                 // window is not an offender.
                 assert!(
-                    Consensus::current_epoch() >= dispute.reveal_deadline,
+                    Consensus::current_epoch() > dispute.reveal_deadline,
                     "reveal window has not passed yet"
                 );
                 if dispute.appealed {
                     assert!(
-                        Consensus::current_epoch() >= dispute.appeal_reveal_deadline,
+                        Consensus::current_epoch() > dispute.appeal_reveal_deadline,
                         "appeal reveal window has not passed yet"
                     );
                 }
@@ -704,6 +705,18 @@ mod verdict {
                 .checked_mul(JUROR_FEE)
                 .expect("juror fee total overflow")
                 .min(principal);
+            // A split of nothing is a pay, not a split: when the juror
+            // fees equal the principal, the post-fee principal is 0, so
+            // a split would route (0, principal), which the escrow's
+            // split positivity check refuses. The fees are still owed,
+            // and the pay outcome routes (0, principal) through the pay
+            // bound, which the fees satisfy. The first-round outcome,
+            // which drives the fee distribution, is unchanged.
+            let outcome = if outcome == VOTE_SPLIT && principal - fees == 0 {
+                VOTE_PAY
+            } else {
+                outcome
+            };
             let payee_amount = match outcome {
                 VOTE_PAY => principal.checked_sub(fees).expect("payee amount underflow"),
                 VOTE_REFUND => 0,
@@ -1025,6 +1038,13 @@ mod verdict {
             assert!(dispute.appeal_drawn, "appeal jury not drawn");
             assert!(!dispute.settled, "dispute already settled");
             assert!(!dispute.closed_no_ruling, "dispute closed with no ruling");
+            // The appeal commit window must have ended before any
+            // appeal reveal is accepted, so no appeal juror can watch
+            // another's revealed vote and then commit adaptively.
+            assert!(
+                Consensus::current_epoch() > dispute.appeal_commit_deadline,
+                "appeal commit window has not ended"
+            );
             assert!(
                 Consensus::current_epoch() <= dispute.appeal_reveal_deadline,
                 "appeal reveal window has passed"
@@ -1050,23 +1070,17 @@ mod verdict {
         /// for the appeal replacement draw. Same rule as the first
         /// round: once per appeal, only when the drawn appeal round
         /// cannot produce a ruling, with the jurors who did not reveal
-        /// recorded as failed. Only a party to the dispute can call it,
+        /// recorded as failed. Anyone can call it,
         /// and only once the appeal reveal window has passed.
         pub fn replace_appeal_jury(&mut self, dispute_id: u64, draw_delay: u64) {
             assert!(
                 draw_delay >= MIN_DRAW_DELAY,
                 "draw delay must be at least one epoch"
             );
-            let signer = CallerContext::transaction_signer_public_key();
-            let escrow = self.dispute(dispute_id).escrow;
-            let payer: RistrettoPublicKeyBytes =
-                ComponentManager::get(escrow).call("payer", args![]);
-            let payee: RistrettoPublicKeyBytes =
-                ComponentManager::get(escrow).call("payee", args![]);
-            assert!(
-                signer == payer || signer == payee,
-                "only a party to the dispute can replace the appeal jury"
-            );
+            // Permissionless, same as the first round: anyone can
+            // trigger a replacement once the appeal reveal window has
+            // passed, so an incomplete appeal round does not depend on
+            // a party submitting a transaction to advance.
             {
                 let dispute = self.dispute(dispute_id);
                 assert!(dispute.appealed, "no appeal opened for this dispute");
@@ -1078,7 +1092,7 @@ mod verdict {
                     "appeal replacement already used"
                 );
                 assert!(
-                    Consensus::current_epoch() >= dispute.appeal_reveal_deadline,
+                    Consensus::current_epoch() > dispute.appeal_reveal_deadline,
                     "appeal reveal window has not passed yet"
                 );
                 assert!(
@@ -1162,11 +1176,11 @@ mod verdict {
                 // still exits instead of staying frozen.
                 let round_finished = dispute.drawn
                     && (dispute.reveals.len() == dispute.panel.len()
-                        || (dispute.replacement_used && now >= dispute.reveal_deadline));
+                        || (dispute.replacement_used && now > dispute.reveal_deadline));
                 let appeal_finished = dispute.appeal_drawn
                     && (dispute.appeal_reveals.len() == dispute.appeal_panel.len()
                         || (dispute.appeal_replacement_used
-                            && now >= dispute.appeal_reveal_deadline));
+                            && now > dispute.appeal_reveal_deadline));
                 // A first round that already ruled is final once its
                 // reveal window has passed: no more first-round reveals
                 // can land after the deadline, so its majority cannot
@@ -1175,7 +1189,7 @@ mod verdict {
                 // before the dispute exits.
                 let first_round_final = dispute.drawn
                     && (dispute.reveals.len() == dispute.panel.len()
-                        || now >= dispute.reveal_deadline);
+                        || now > dispute.reveal_deadline);
                 // A draw that never executed can never execute once
                 // its reschedules are spent and its final locked epoch
                 // has passed. The dispute then closes the same way

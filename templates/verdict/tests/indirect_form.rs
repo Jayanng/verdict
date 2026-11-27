@@ -192,7 +192,8 @@ fn settle(setup: &mut Setup, signer: &RistrettoSecretKey, dispute_id: u64) {
         args![dispute_id],
         vec![],
     );
-    set_epoch(&mut setup.test, deadline);
+    // Settle requires an epoch strictly after the reveal deadline.
+    set_epoch(&mut setup.test, deadline + 1);
     let verdict = setup.verdict;
     setup.test.execute_expect_success(
         setup
@@ -272,6 +273,7 @@ fn rule_dispute(setup: &mut Setup, jurors: &[Party], dispute_id: u64, votes: [u6
             )
         })
         .collect();
+    let mut revealed: Vec<(RistrettoSecretKey, u64, Hash32)> = Vec::new();
     for (i, key) in panel.iter().enumerate() {
         let juror = jurors
             .iter()
@@ -288,15 +290,17 @@ fn rule_dispute(setup: &mut Setup, jurors: &[Party], dispute_id: u64, votes: [u6
                 .build_and_seal(&juror_secret),
             vec![],
         );
+        revealed.push((juror_secret, votes[i], salt));
+    }
+    // The commit window ends at draw + 1, so reveals happen at draw + 2,
+    // the reveal deadline: after the commit window ends, before it closes.
+    set_epoch(&mut setup.test, DRAW_DELAY + 2);
+    for (juror_secret, vote, salt) in revealed {
         setup.test.execute_expect_success(
             setup
                 .test
                 .transaction()
-                .call_method(
-                    setup.verdict,
-                    "reveal_vote",
-                    args![dispute_id, votes[i], salt],
-                )
+                .call_method(setup.verdict, "reveal_vote", args![dispute_id, vote, salt])
                 .build_and_seal(&juror_secret),
             vec![],
         );

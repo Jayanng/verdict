@@ -13,6 +13,7 @@ import {
   PANEL_SIZE,
   APPEAL_PANEL_SIZE,
   JUROR_FEE,
+  MAX_PRINCIPAL_FEE,
   BOND_FLOOR,
   APPEAL_FEE,
   SLASH,
@@ -111,6 +112,18 @@ export class SimEscrow {
     if (typeof courtId !== "string" || courtId.length === 0) {
       fail("court id must be a non-empty string");
     }
+    if (typeof id !== "string" || id.length === 0) {
+      fail("escrow id must be a non-empty string");
+    }
+    if (typeof payer !== "string" || payer.length === 0) {
+      fail("payer must be a non-empty string");
+    }
+    if (typeof payee !== "string" || payee.length === 0) {
+      fail("payee must be a non-empty string");
+    }
+    if (payer === payee) {
+      fail("payee must differ from the payer");
+    }
     this.id = id;
     this.payer = payer;
     this.payee = payee;
@@ -163,6 +176,24 @@ export class SimEscrow {
     }
     if (payeeAmount + payerAmount !== this.vault) {
       fail("ruling amounts must equal the vault balance");
+    }
+    // The ruling shape checks, after conservation and before any
+    // mutation, mirroring the template's escrow exactly: a pay ruling
+    // hands the payer only the juror fee, and a split pays both sides
+    // in near-equal halves. The rejection strings match the template's.
+    const maxFee = BigInt(MAX_PRINCIPAL_FEE);
+    if (outcome === VOTE_PAY && payerAmount > maxFee) {
+      fail("pay fee exceeds the maximum juror fee total");
+    }
+    if (outcome === VOTE_SPLIT) {
+      if (payeeAmount <= 0n) fail("split must pay the payee");
+      if (payerAmount <= 0n) fail("split must pay the payer");
+      if (payeeAmount - payerAmount > 1n) {
+        fail("split payee exceeds the payer by more than one micro-Tari");
+      }
+      if (payerAmount - payeeAmount > maxFee) {
+        fail("split payer exceeds the payee by more than the maximum juror fee total");
+      }
     }
     this.rulingExecuted = true;
     this.frozen = false;
@@ -433,6 +464,7 @@ export class SimCourt {
     if (!dispute.drawn) fail("jury not drawn for this dispute");
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
+    if (this.epoch <= dispute.commitDeadline) fail("commit window has not ended");
     if (this.epoch > dispute.revealDeadline) fail("reveal window has passed");
     validVote(vote);
     const stored = dispute.commits.get(juror);
@@ -444,15 +476,15 @@ export class SimCourt {
     return vote;
   }
 
+  // Anyone can call a replacement: an incomplete round must not
+  // depend on a party submitting a transaction, or the dispute freezes
+  // when neither party acts.
   replaceJury(disputeId, caller, drawDelay) {
     const dispute = this.dispute(disputeId);
     validDelay(drawDelay);
-    if (caller !== dispute.payer && caller !== dispute.payee) {
-      fail("only a party to the dispute can replace the jury");
-    }
     if (!dispute.drawn) fail("jury not drawn for this dispute");
     if (dispute.replacementUsed) fail("replacement already used");
-    if (this.epoch < dispute.revealDeadline) fail("reveal window has not passed yet");
+    if (this.epoch <= dispute.revealDeadline) fail("reveal window has not passed yet");
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
     // The new draw epoch is computed before any state changes, so a
@@ -552,13 +584,21 @@ export class SimCourt {
     }
     // The reveal window must have passed before anyone can be slashed
     // for not revealing: a juror inside their window is not an offender.
-    if (this.epoch < dispute.revealDeadline) fail("reveal window has not passed yet");
-    if (dispute.appealed && this.epoch < dispute.appealRevealDeadline) {
+    if (this.epoch <= dispute.revealDeadline) fail("reveal window has not passed yet");
+    if (dispute.appealed && this.epoch <= dispute.appealRevealDeadline) {
       fail("appeal reveal window has not passed yet");
     }
     const escrow = this.escrows.get(dispute.escrowId);
     const amounts = settleAmounts(dispute.principal, outcome, first.count);
     const fees = amounts.fees;
+    // A split of nothing is a pay, not a split: when the juror fees
+    // equal the principal, the post-fee principal is 0, so a split
+    // would route (0, principal), which the escrow's split positivity
+    // check refuses. The outcome the escrow sees is pay, the same
+    // conversion the template makes before it orders the ruling.
+    if (outcome === VOTE_SPLIT && dispute.principal - fees === 0n) {
+      outcome = VOTE_PAY;
+    }
     // One call returns both buckets: the payee amount and the gross
     // payer amount. The court takes the fees out of the gross payer
     // bucket before paying the payer the net amount.
@@ -723,6 +763,7 @@ export class SimCourt {
     if (!dispute.appealDrawn) fail("appeal jury not drawn");
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
+    if (this.epoch <= dispute.appealCommitDeadline) fail("appeal commit window has not ended");
     if (this.epoch > dispute.appealRevealDeadline) fail("appeal reveal window has passed");
     validVote(vote);
     const stored = dispute.appealCommits.get(juror);
@@ -734,16 +775,15 @@ export class SimCourt {
     return vote;
   }
 
+  // Anyone can call a replacement: an incomplete round must not
+  // depend on a party submitting a transaction.
   replaceAppealJury(disputeId, caller, drawDelay) {
     const dispute = this.dispute(disputeId);
     validDelay(drawDelay);
-    if (caller !== dispute.payer && caller !== dispute.payee) {
-      fail("only a party to the dispute can replace the appeal jury");
-    }
     if (!dispute.appealed) fail("no appeal opened for this dispute");
     if (!dispute.appealDrawn) fail("appeal jury not drawn");
     if (dispute.appealReplacementUsed) fail("appeal replacement already used");
-    if (this.epoch < dispute.appealRevealDeadline) {
+    if (this.epoch <= dispute.appealRevealDeadline) {
       fail("appeal reveal window has not passed yet");
     }
     if (dispute.settled) fail("dispute already settled");
@@ -790,11 +830,11 @@ export class SimCourt {
     const roundFinished =
       dispute.drawn &&
       (dispute.reveals.size === dispute.panel.length ||
-        (dispute.replacementUsed && this.epoch >= dispute.revealDeadline));
+        (dispute.replacementUsed && this.epoch > dispute.revealDeadline));
     const appealFinished =
       dispute.appealDrawn &&
       (dispute.appealReveals.size === dispute.appealPanel.length ||
-        (dispute.appealReplacementUsed && this.epoch >= dispute.appealRevealDeadline));
+        (dispute.appealReplacementUsed && this.epoch > dispute.appealRevealDeadline));
     // A first round that already ruled is final once its reveal window
     // has passed: no more first-round reveals can land after the
     // deadline, so its majority cannot change. A close under appeal
@@ -803,7 +843,7 @@ export class SimCourt {
     const firstRoundFinal =
       dispute.drawn &&
       (dispute.reveals.size === dispute.panel.length ||
-        this.epoch >= dispute.revealDeadline);
+        this.epoch > dispute.revealDeadline);
     // A draw that never executed can never execute once its
     // reschedules are spent and its final locked epoch has passed. The
     // dispute then closes the same way instead of staying frozen.
