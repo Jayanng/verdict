@@ -1300,9 +1300,10 @@ describe("settlement precision", () => {
 });
 
 describe("reveal deadline check on settle", () => {
-  test("settle before the reveal deadline is rejected, at the deadline it runs", () => {
+  test("settle at the reveal deadline is rejected and runs strictly afterward", () => {
     const court = makeCourt(3);
     const { disputeId } = disputeWithRuling(court, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    assert.equal(court.epoch, court.dispute(disputeId).revealDeadline);
     assert.throws(() => court.settle(disputeId), /reveal window has not passed yet/);
     const result = settleAtDeadline(court, disputeId);
     assert.equal(result.outcome, VOTE_PAY);

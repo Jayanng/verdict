@@ -424,6 +424,13 @@ describe("BigInt settlement amounts", () => {
     assert.deepEqual(splitLargestRemainder(10n, [1, 1, 1]), [4n, 3n, 3n]);
   });
 
+  test("large Number inputs preserve exact remainder ordering", () => {
+    assert.deepEqual(
+      splitLargestRemainder(Number.MAX_SAFE_INTEGER, [2, 3, 1]),
+      [3002399751580330, 4503599627370496, 1501199875790165],
+    );
+  });
+
   test("a negative BigInt principal or weight is refused, not computed", () => {
     assert.throws(() => settleAmounts(-500000n, VOTE_PAY, 2), /must not be negative/);
     assert.throws(() => settleAmounts(500000n, VOTE_PAY, -2n), /must not be negative/);

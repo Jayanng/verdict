@@ -366,22 +366,18 @@ export function splitLargestRemainder(total, weights) {
       throw new Error("weights must be non-negative whole numbers within the safe integer range");
     }
   }
-  const weightSum = weights.reduce((sum, w) => sum + w, 0);
-  if (weightSum <= 0) throw new Error("weights must sum to more than 0");
-  const exact = weights.map((w) => (total * w) / weightSum);
-  const floors = exact.map((x) => Math.floor(x));
-  let assigned = floors.reduce((sum, x) => sum + x, 0);
-  const order = exact
-    .map((x, i) => ({ i, frac: x - Math.floor(x) }))
-    .sort((a, b) => b.frac - a.frac || a.i - b.i);
-  const out = [...floors];
-  let k = 0;
-  while (assigned < total) {
-    out[order[k % order.length].i] += 1;
-    assigned += 1;
-    k += 1;
-  }
-  return out;
+  // Validated safe integers still do not make the products, the sum,
+  // or the fractional quotients exact: at the top of the safe range
+  // the floating-point fractions round, and two different fractions
+  // can round to the same value, so the remainder lands on the wrong
+  // recipient. The allocation itself runs through the exact BigInt
+  // branch, and only the final shares come back as Numbers. Each
+  // share is at most the validated total, so that conversion is
+  // exact.
+  return splitLargestRemainder(
+    BigInt(total),
+    weights.map((w) => BigInt(w)),
+  ).map((share) => Number(share));
 }
 
 // The escrow caller rule, as published: execute_ruling(dispute_id,
