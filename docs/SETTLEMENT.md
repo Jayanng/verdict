@@ -241,7 +241,12 @@ slashed, and the forfeited bonds go to the jurors who did reveal, other
 than jurors who voted to refuse: a refusing juror is neither paid nor
 slashed. When nobody who revealed is payable, nobody is slashed: there is
 no one to pay, and the court keeps nothing. Failed jurors are kept per
-round, so an appeal close slashes appeal failures only. An unspent appeal fee returns to the
+round, so each round's forfeited bonds go to that round's revealers: on
+an appeal close the first round's failures go to first-round revealers
+and the appeal round's failures go to appeal revealers, never across
+rounds. The close runs only strictly after the reveal deadline, even
+when every juror has already revealed: a full reveal does not shorten
+the window. An unspent appeal fee returns to the
 appellant in full. A closed dispute can never settle, and the escrow is
 terminal: completed, cancelled, refunded, or ruled.
 

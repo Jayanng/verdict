@@ -547,6 +547,7 @@ describe("no-ruling fallback", () => {
     const { panel } = drawAt(court, disputeId);
     rulePanel(court, disputeId, panel, [VOTE_REFUSE, VOTE_REFUSE, VOTE_PAY]);
     assert.throws(() => court.settle(disputeId), /first round has no majority ruling/);
+    court.setEpoch(court.dispute(disputeId).revealDeadline + 1);
     court.closeNoRuling(disputeId);
     for (const key of panel) {
       assert.equal(court.bonds.get(key), BigInt(BOND_FLOOR));
@@ -1189,6 +1190,18 @@ describe("input validation", () => {
       /payee must differ from the payer/,
     );
   });
+
+  test("an invalid escrow id does not deduct the payer balance", () => {
+    const court = makeCourt(3);
+    court.fund("payer", 1000000);
+    const before = court.balance("payer");
+    assert.throws(
+      () => court.createEscrow("", "payer", "payee", TOTAL),
+      /escrow id must be a non-empty string/,
+    );
+    assert.equal(court.balance("payer"), before);
+    assert.equal(court.escrows.has(""), false);
+  });
 });
 
 describe("settlement precision", () => {
@@ -1582,6 +1595,7 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
     // deadline, so the first round is final by the time the appeal
     // round is done, and the close runs: the whole principal returns
     // to the payer, and the appeal fee returns in full.
+    court.setEpoch(court.dispute(disputeId).appealRevealDeadline + 1);
     const payerBefore = court.balance("payer");
     const result = court.closeNoRuling(disputeId);
     assert.equal(result.payerAmount, BigInt(TOTAL));
@@ -1658,6 +1672,7 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
     );
     const second = makeCourt(3);
     const closed = disputeWithRuling(second, [VOTE_REFUSE, VOTE_REFUSE, VOTE_PAY]);
+    second.setEpoch(second.dispute(closed.disputeId).revealDeadline + 1);
     second.closeNoRuling(closed.disputeId);
     assert.throws(
       () => second.commitVote(closed.disputeId, closed.panel[2], VOTE_PAY, salt(9)),
@@ -1710,5 +1725,102 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
     assert.equal(court.balance("payer"), payerBefore + BigInt(TOTAL + APPEAL_FEE));
     assert.equal(court.escrows.get("escrow-0").vault, 0n);
     assert.equal(court.dispute(disputeId).closedNoRuling, true);
+  });
+
+  test("a fully revealed round does not close in the reveal deadline epoch", () => {
+    const court = makeCourt(3);
+    const { disputeId, panel } = disputeWithRuling(court, [
+      VOTE_PAY,
+      VOTE_REFUND,
+      VOTE_SPLIT,
+    ]);
+    // All three revealed with no majority, and the epoch is the reveal
+    // deadline: the close must wait until the window has passed.
+    assert.equal(court.epoch, court.dispute(disputeId).revealDeadline);
+    assert.throws(
+      () => court.closeNoRuling(disputeId),
+      /first round can still reach a ruling/,
+    );
+    court.setEpoch(court.dispute(disputeId).revealDeadline + 1);
+    const result = court.closeNoRuling(disputeId);
+    assert.equal(result.payerAmount, BigInt(TOTAL));
+    assert.equal(court.dispute(disputeId).closedNoRuling, true);
+  });
+
+  test("a fully revealed appeal round does not close in the appeal deadline epoch", () => {
+    const court = makeCourt();
+    const { disputeId, appealPanel } = disputeWithAppealDrawn(court, [
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_REFUND,
+    ]);
+    ruleAppealPanel(court, disputeId, appealPanel, [
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_REFUND,
+      VOTE_REFUND,
+      VOTE_REFUND,
+      VOTE_REFUSE,
+    ]);
+    // The appeal round is fully revealed with no majority, and the
+    // epoch is the appeal reveal deadline: the close must wait.
+    assert.equal(court.epoch, court.dispute(disputeId).appealRevealDeadline);
+    assert.throws(
+      () => court.closeNoRuling(disputeId),
+      /appeal round can still reach a ruling/,
+    );
+    court.setEpoch(court.dispute(disputeId).appealRevealDeadline + 1);
+    const result = court.closeNoRuling(disputeId);
+    assert.equal(result.payerAmount, BigInt(TOTAL));
+    assert.equal(court.dispute(disputeId).closedNoRuling, true);
+  });
+
+  test("an appeal close slashes first-round failed jurors to first-round revealers", () => {
+    const court = makeCourt();
+    const disputeId = openFunded(court);
+    const { panel } = drawAt(court, disputeId);
+    // One juror reveals pay, the other two stay silent: no majority,
+    // so the round is replaced and the two silent jurors are recorded
+    // as failed.
+    rulePanel(court, disputeId, panel.slice(0, 1), [VOTE_PAY]);
+    court.setEpoch(court.dispute(disputeId).revealDeadline + 1);
+    court.replaceJury(disputeId, "payer", DRAW_DELAY);
+    court.setEpoch(court.dispute(disputeId).drawEpoch);
+    const redrawn = court.drawJury(disputeId);
+    rulePanel(court, disputeId, redrawn.panel, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    court.openAppeal(disputeId, "payer", APPEAL_FEE, DRAW_DELAY);
+    const dispute = court.dispute(disputeId);
+    court.setEpoch(dispute.appealDrawEpoch);
+    const { panel: appealPanel } = court.drawAppealJury(disputeId);
+    ruleAppealPanel(court, disputeId, appealPanel, [
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_PAY,
+      VOTE_REFUND,
+      VOTE_REFUND,
+      VOTE_REFUND,
+      VOTE_REFUSE,
+    ]);
+    court.setEpoch(court.dispute(disputeId).appealRevealDeadline + 1);
+    const result = court.closeNoRuling(disputeId);
+    assert.equal(result.payerAmount, BigInt(TOTAL));
+    // The two silent jurors from the original panel each lost one
+    // juror fee of bond.
+    for (const key of panel.slice(1)) {
+      assert.equal(court.bonds.get(key), BigInt(BOND_FLOOR - JUROR_FEE));
+    }
+    assert.equal(court.bonds.get(panel[0]), BigInt(BOND_FLOOR));
+    // The two slashed bonds, 10,000 in total, go to the replacement
+    // panel's revealers, split by largest remainder: 3,334, 3,333,
+    // 3,333 in panel order.
+    const expected = [3334n, 3333n, 3333n];
+    let totalClaim = 0n;
+    redrawn.panel.forEach((key, i) => {
+      const claim = court.dispute(disputeId).claims.get(key);
+      assert.equal(claim?.amount, expected[i]);
+      totalClaim += claim?.amount || 0n;
+    });
+    assert.equal(totalClaim, 2n * BigInt(JUROR_FEE));
   });
 });

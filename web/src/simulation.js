@@ -265,6 +265,13 @@ export class SimCourt {
 
   createEscrow(id, payer, payee, principal) {
     if (this.escrows.has(id)) fail("escrow already exists");
+    // Validate the id before any balance moves: the escrow
+    // constructor checks it too, but only after the payer has
+    // already been debited, which would leave the simulation
+    // partially mutated on a rejected creation.
+    if (typeof id !== "string" || id.length === 0) {
+      fail("escrow id must be a non-empty string");
+    }
     if (typeof payer !== "string" || payer === "") fail("invalid payer");
     if (typeof payee !== "string" || payee === "") fail("invalid payee");
     if (payer === payee) fail("payee must differ from the payer");
@@ -823,27 +830,28 @@ export class SimCourt {
     const dispute = this.dispute(disputeId);
     if (dispute.settled) fail("dispute already settled");
     if (dispute.closedNoRuling) fail("dispute already closed with no ruling");
-    // A round is finished when it is fully revealed. A replacement
-    // round is also finished once its own reveal window has passed with
-    // no majority, so the replacement round always gets its full window
-    // to vote before the close can run.
+    // A round is finished when its reveal window has passed and it
+    // is fully revealed, or when a replacement round's own reveal
+    // window has passed with no majority, so the replacement round
+    // always gets its full window to vote before the close can run.
+    // A full reveal alone is not enough: finalization runs strictly
+    // after the reveal deadline, never in the deadline epoch, so no
+    // juror's timely reveal can be cut off.
     const roundFinished =
       dispute.drawn &&
-      (dispute.reveals.size === dispute.panel.length ||
-        (dispute.replacementUsed && this.epoch > dispute.revealDeadline));
+      this.epoch > dispute.revealDeadline &&
+      (dispute.reveals.size === dispute.panel.length || dispute.replacementUsed);
     const appealFinished =
       dispute.appealDrawn &&
+      this.epoch > dispute.appealRevealDeadline &&
       (dispute.appealReveals.size === dispute.appealPanel.length ||
-        (dispute.appealReplacementUsed && this.epoch > dispute.appealRevealDeadline));
+        dispute.appealReplacementUsed);
     // A first round that already ruled is final once its reveal window
     // has passed: no more first-round reveals can land after the
     // deadline, so its majority cannot change. A close under appeal
     // needs that as well as the appeal round finished, so both rounds
     // are done before the dispute exits.
-    const firstRoundFinal =
-      dispute.drawn &&
-      (dispute.reveals.size === dispute.panel.length ||
-        this.epoch > dispute.revealDeadline);
+    const firstRoundFinal = dispute.drawn && this.epoch > dispute.revealDeadline;
     // A draw that never executed can never execute once its
     // reschedules are spent and its final locked epoch has passed. The
     // dispute then closes the same way instead of staying frozen.
@@ -879,32 +887,44 @@ export class SimCourt {
     if (payeeMoved !== 0n) fail("no-ruling payee amount must be 0");
     if (payerMoved !== principal) fail("no-ruling payer amount must be the whole principal");
     this.fund(dispute.payer, payerMoved);
-    const rulingPanel = dispute.appealed ? dispute.appealPanel : dispute.panel;
-    const rulingReveals = dispute.appealed ? dispute.appealReveals : dispute.reveals;
     // Jurors who voted to refuse are neither paid nor slashed: they are
     // left out of the payable set, and they revealed, so they are left
-    // out of the slash set too.
-    const revealedKeys = [...rulingReveals.keys()];
-    const payableKeys = [...rulingReveals.entries()]
-      .filter(([, vote]) => vote !== VOTE_REFUSE)
-      .map(([key]) => key);
-    const failedJurors = dispute.appealed
-      ? dispute.appealFailedJurors
-      : dispute.failedJurors;
+    // out of the slash set too. Failed jurors are kept per round, so
+    // each round's forfeited bonds go to that round's revealers: on an
+    // appeal close the first round's failures go to first-round
+    // revealers and the appeal round's failures go to appeal
+    // revealers, never across rounds.
+    const rounds = [
+      [dispute.panel, dispute.reveals, dispute.failedJurors],
+    ];
+    if (dispute.appealed) {
+      rounds.push([dispute.appealPanel, dispute.appealReveals, dispute.appealFailedJurors]);
+    }
     let slashTotal = 0n;
-    if (payableKeys.length > 0) {
-      const slashKeys = rulingPanel.filter((key) => !revealedKeys.includes(key));
-      for (const key of failedJurors) {
-        if (!slashKeys.includes(key)) slashKeys.push(key);
-      }
-      slashTotal = this.slashKeys(slashKeys);
-      if (slashTotal > 0n) {
-        const shares = splitLargestRemainder(slashTotal, payableKeys.map(() => 1));
-        payableKeys.forEach((key, i) => {
-          if (shares[i] > 0n) {
-            dispute.claims.set(key, { amount: shares[i], claimed: false });
-          }
-        });
+    for (const [rulingPanel, rulingReveals, failedJurors] of rounds) {
+      const revealedKeys = [...rulingReveals.keys()];
+      const payableKeys = [...rulingReveals.entries()]
+        .filter(([, vote]) => vote !== VOTE_REFUSE)
+        .map(([key]) => key);
+      if (payableKeys.length > 0) {
+        const slashKeys = rulingPanel.filter((key) => !revealedKeys.includes(key));
+        for (const key of failedJurors) {
+          if (!slashKeys.includes(key)) slashKeys.push(key);
+        }
+        const roundSlash = this.slashKeys(slashKeys);
+        slashTotal += roundSlash;
+        if (roundSlash > 0n) {
+          const shares = splitLargestRemainder(roundSlash, payableKeys.map(() => 1));
+          payableKeys.forEach((key, i) => {
+            if (shares[i] > 0n) {
+              const existing = dispute.claims.get(key);
+              dispute.claims.set(key, {
+                amount: (existing?.amount || 0n) + shares[i],
+                claimed: existing?.claimed || false,
+              });
+            }
+          });
+        }
       }
     }
     if (dispute.appealed && dispute.appealFee > 0n) {

@@ -171,12 +171,13 @@ mod verdict {
         pub reschedules: u64,
         /// Drawn jurors who failed to reveal in a replaced first round.
         /// They are slashed when the dispute settles or closes, and the
-        /// forfeited bonds top up the first-round majority only.
+        /// forfeited bonds go to the first-round revealers: the majority
+        /// on a settle, the revealers on a close, never the appeal round.
         pub failed_jurors: Vec<RistrettoPublicKeyBytes>,
         /// Drawn jurors who failed to reveal in a replaced appeal round.
         /// They are slashed when the dispute settles or closes, and the
-        /// forfeited bonds top up the appeal majority only, never the
-        /// first-round majority.
+        /// forfeited bonds go to the appeal-round revealers: the majority
+        /// on a settle, the revealers on a close, never the first round.
         pub appeal_failed_jurors: Vec<RistrettoPublicKeyBytes>,
         /// Fee claims recorded at settle or close, one per juror owed.
         pub claims: Vec<FeeClaim>,
@@ -1169,27 +1170,29 @@ mod verdict {
                     "dispute already closed with no ruling"
                 );
                 let now = Consensus::current_epoch();
-                // A round is finished when it is fully revealed. A
-                // replacement round is also finished once its own
-                // reveal window has passed with no majority: the new
-                // jurors have had their full window, and the dispute
-                // still exits instead of staying frozen.
+                // A round is finished when its reveal window has
+                // passed and it is fully revealed, or when a
+                // replacement round's own reveal window has passed
+                // with no majority: the new jurors have had their
+                // full window, and the dispute still exits instead
+                // of staying frozen. A full reveal alone is not
+                // enough: finalization runs strictly after the
+                // reveal deadline, never in the deadline epoch,
+                // so no juror's timely reveal can be cut off.
                 let round_finished = dispute.drawn
-                    && (dispute.reveals.len() == dispute.panel.len()
-                        || (dispute.replacement_used && now > dispute.reveal_deadline));
+                    && now > dispute.reveal_deadline
+                    && (dispute.reveals.len() == dispute.panel.len() || dispute.replacement_used);
                 let appeal_finished = dispute.appeal_drawn
+                    && now > dispute.appeal_reveal_deadline
                     && (dispute.appeal_reveals.len() == dispute.appeal_panel.len()
-                        || (dispute.appeal_replacement_used
-                            && now > dispute.appeal_reveal_deadline));
+                        || dispute.appeal_replacement_used);
                 // A first round that already ruled is final once its
                 // reveal window has passed: no more first-round reveals
                 // can land after the deadline, so its majority cannot
                 // change. A close under appeal needs that as well as
                 // the appeal round finished, so both rounds are done
                 // before the dispute exits.
-                let first_round_final = dispute.drawn
-                    && (dispute.reveals.len() == dispute.panel.len()
-                        || now > dispute.reveal_deadline);
+                let first_round_final = dispute.drawn && now > dispute.reveal_deadline;
                 // A draw that never executed can never execute once
                 // its reschedules are spent and its final locked epoch
                 // has passed. The dispute then closes the same way
@@ -1257,11 +1260,39 @@ mod verdict {
             // voted to refuse: a refusing juror is neither paid nor
             // slashed. When nobody who revealed is payable, nobody is
             // slashed: there is no one to pay, and the court keeps
-            // nothing. Failed jurors are kept per round, so an appeal
-            // close slashes appeal failures only.
-            let (ruling_panel, revealed_keys, payable_keys, failed_jurors) = {
+            // nothing. Failed jurors are kept per round, so each round's
+            // forfeited bonds go to that round's revealers: on an appeal
+            // close the first round's failures go to first-round
+            // revealers and the appeal round's failures go to appeal
+            // revealers, never across rounds.
+            let (panel, revealed_keys, payable_keys, failed_jurors) = {
                 let dispute = self.dispute(dispute_id);
-                if dispute.appealed {
+                (
+                    dispute.panel.clone(),
+                    dispute
+                        .reveals
+                        .iter()
+                        .map(|r| r.juror)
+                        .collect::<Vec<RistrettoPublicKeyBytes>>(),
+                    dispute
+                        .reveals
+                        .iter()
+                        .filter(|r| r.vote != VOTE_REFUSE)
+                        .map(|r| r.juror)
+                        .collect::<Vec<RistrettoPublicKeyBytes>>(),
+                    dispute.failed_jurors.clone(),
+                )
+            };
+            self.slash_close_round(
+                dispute_id,
+                &panel,
+                &revealed_keys,
+                &payable_keys,
+                &failed_jurors,
+            );
+            if self.dispute(dispute_id).appealed {
+                let (appeal_panel, appeal_revealed, appeal_payable, appeal_failed) = {
+                    let dispute = self.dispute(dispute_id);
                     (
                         dispute.appeal_panel.clone(),
                         dispute
@@ -1277,49 +1308,14 @@ mod verdict {
                             .collect::<Vec<RistrettoPublicKeyBytes>>(),
                         dispute.appeal_failed_jurors.clone(),
                     )
-                } else {
-                    (
-                        dispute.panel.clone(),
-                        dispute
-                            .reveals
-                            .iter()
-                            .map(|r| r.juror)
-                            .collect::<Vec<RistrettoPublicKeyBytes>>(),
-                        dispute
-                            .reveals
-                            .iter()
-                            .filter(|r| r.vote != VOTE_REFUSE)
-                            .map(|r| r.juror)
-                            .collect::<Vec<RistrettoPublicKeyBytes>>(),
-                        dispute.failed_jurors.clone(),
-                    )
-                }
-            };
-            let slash_total = if payable_keys.is_empty() {
-                0
-            } else {
-                let mut slash_keys_list: Vec<RistrettoPublicKeyBytes> = ruling_panel
-                    .iter()
-                    .filter(|key| !revealed_keys.contains(key))
-                    .cloned()
-                    .collect();
-                for key in failed_jurors {
-                    if !slash_keys_list.contains(&key) {
-                        slash_keys_list.push(key);
-                    }
-                }
-                self.slash_keys(&slash_keys_list)
-            };
-            if !payable_keys.is_empty() && slash_total > 0 {
-                let dispute = self.dispute_mut(dispute_id);
-                for (i, share) in Self::distribute(slash_total, payable_keys.len() as u64)
-                    .into_iter()
-                    .enumerate()
-                {
-                    if share > 0 {
-                        Self::add_claim(dispute, payable_keys[i], share);
-                    }
-                }
+                };
+                self.slash_close_round(
+                    dispute_id,
+                    &appeal_panel,
+                    &appeal_revealed,
+                    &appeal_payable,
+                    &appeal_failed,
+                );
             }
             if self.dispute(dispute_id).appealed && self.dispute(dispute_id).appeal_fee > 0 {
                 let appellant_account = self
@@ -1727,6 +1723,47 @@ mod verdict {
             (0..count)
                 .map(|i| if i < extra { base + 1 } else { base })
                 .collect()
+        }
+
+        /// Slash one round's non-revealers on a no-ruling close, and pay
+        /// the forfeited bonds to that round's revealers, other than
+        /// jurors who voted to refuse. `panel` is the round's drawn
+        /// panel, `revealed_keys` the jurors who revealed, `payable_keys`
+        /// the revealers who did not refuse, and `failed_jurors` the
+        /// jurors recorded as failed when the round was replaced.
+        fn slash_close_round(
+            &mut self,
+            dispute_id: u64,
+            panel: &[RistrettoPublicKeyBytes],
+            revealed_keys: &[RistrettoPublicKeyBytes],
+            payable_keys: &[RistrettoPublicKeyBytes],
+            failed_jurors: &[RistrettoPublicKeyBytes],
+        ) {
+            if payable_keys.is_empty() {
+                return;
+            }
+            let mut slash_keys_list: Vec<RistrettoPublicKeyBytes> = panel
+                .iter()
+                .filter(|key| !revealed_keys.contains(key))
+                .cloned()
+                .collect();
+            for key in failed_jurors {
+                if !slash_keys_list.contains(key) {
+                    slash_keys_list.push(*key);
+                }
+            }
+            let slash_total = self.slash_keys(&slash_keys_list);
+            if slash_total > 0 {
+                let dispute = self.dispute_mut(dispute_id);
+                for (i, share) in Self::distribute(slash_total, payable_keys.len() as u64)
+                    .into_iter()
+                    .enumerate()
+                {
+                    if share > 0 {
+                        Self::add_claim(dispute, payable_keys[i], share);
+                    }
+                }
+            }
         }
 
         /// Forfeit one juror fee of bond from each listed juror, capped
