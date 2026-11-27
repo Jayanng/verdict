@@ -28,6 +28,8 @@ import {
   VOTE_SPLIT,
   VOTE_REFUSE,
   derivePanel,
+  drawHorizonFits,
+  futureDrawFits,
   majorityOutcome,
   settleAmounts,
   splitLargestRemainder,
@@ -330,6 +332,13 @@ export class SimCourt {
     const openEpoch = this.epoch;
     const openEpochHash = this.epochHash(openEpoch);
     const drawEpoch = safeEpochSum(openEpoch, drawDelay);
+    // The draw epoch must leave room for the whole voting horizon,
+    // checked before the escrow freezes: a draw at the top of the
+    // range could never execute, never reschedule, and never close,
+    // freezing the escrow.
+    if (!drawHorizonFits(drawEpoch)) {
+      fail("draw epoch leaves no room for the voting windows");
+    }
     const eligiblePool = [...this.jurors.keys()];
     // All validation runs before the freeze: the simulation has no
     // rollback, so a failed opening must leave the escrow unfrozen.
@@ -447,7 +456,11 @@ export class SimCourt {
     if (dispute.closedNoRuling) fail("dispute closed with no ruling");
     if (this.epoch <= dispute.drawEpoch) fail("draw epoch has not passed yet");
     if (dispute.reschedules >= MAX_RESCHEDULES) fail("draw reschedule limit reached");
-    dispute.drawEpoch = safeEpochSum(this.epoch, 1);
+    const newDrawEpoch = safeEpochSum(this.epoch, 1);
+    if (!drawHorizonFits(newDrawEpoch)) {
+      fail("draw epoch leaves no room for the voting windows");
+    }
+    dispute.drawEpoch = newDrawEpoch;
     dispute.reschedules += 1;
     return dispute.drawEpoch;
   }
@@ -497,6 +510,9 @@ export class SimCourt {
     // The new draw epoch is computed before any state changes, so a
     // refused sum leaves the dispute exactly as it was.
     const newDrawEpoch = safeEpochSum(this.epoch, drawDelay);
+    if (!drawHorizonFits(newDrawEpoch)) {
+      fail("draw epoch leaves no room for the voting windows");
+    }
     dispute.failedJurors = dispute.panel.filter((key) => !dispute.reveals.has(key));
     dispute.panel = [];
     dispute.commits = new Map();
@@ -694,6 +710,9 @@ export class SimCourt {
     // The draw epoch is computed before any state changes, so a
     // refused sum leaves the fee with the caller and the appeal unopened.
     const appealDrawEpoch = safeEpochSum(this.epoch, drawDelay);
+    if (!drawHorizonFits(appealDrawEpoch)) {
+      fail("draw epoch leaves no room for the voting windows");
+    }
     this.balances.set(caller, this.balance(caller) - feeAmount);
     this.feeVault += feeAmount;
     dispute.appealed = true;
@@ -747,7 +766,11 @@ export class SimCourt {
     if (dispute.appealReschedules >= MAX_RESCHEDULES) {
       fail("appeal draw reschedule limit reached");
     }
-    dispute.appealDrawEpoch = safeEpochSum(this.epoch, 1);
+    const newAppealDrawEpoch = safeEpochSum(this.epoch, 1);
+    if (!drawHorizonFits(newAppealDrawEpoch)) {
+      fail("draw epoch leaves no room for the voting windows");
+    }
+    dispute.appealDrawEpoch = newAppealDrawEpoch;
     dispute.appealReschedules += 1;
     return dispute.appealDrawEpoch;
   }
@@ -801,6 +824,9 @@ export class SimCourt {
     // The new draw epoch is computed before any state changes, so a
     // refused sum leaves the dispute exactly as it was.
     const newAppealDrawEpoch = safeEpochSum(this.epoch, drawDelay);
+    if (!drawHorizonFits(newAppealDrawEpoch)) {
+      fail("draw epoch leaves no room for the voting windows");
+    }
     dispute.appealFailedJurors = dispute.appealPanel.filter(
       (key) => !dispute.appealReveals.has(key),
     );
@@ -839,16 +865,23 @@ export class SimCourt {
     // always gets its full window to vote before the close can run.
     // A full reveal alone is not enough: finalization runs strictly
     // after the reveal deadline, never in the deadline epoch, so no
-    // juror's timely reveal can be cut off.
+    // juror's timely reveal can be cut off. A round whose replacement
+    // can never be scheduled is finished too: when the current epoch
+    // plus one leaves no room for a voting horizon, no replacement
+    // draw can be accepted, so waiting for one would freeze the
+    // dispute.
     const roundFinished =
       dispute.drawn &&
       this.epoch > dispute.revealDeadline &&
-      (dispute.reveals.size === dispute.panel.length || dispute.replacementUsed);
+      (dispute.reveals.size === dispute.panel.length ||
+        dispute.replacementUsed ||
+        !futureDrawFits(this.epoch));
     const appealFinished =
       dispute.appealDrawn &&
       this.epoch > dispute.appealRevealDeadline &&
       (dispute.appealReveals.size === dispute.appealPanel.length ||
-        dispute.appealReplacementUsed);
+        dispute.appealReplacementUsed ||
+        !futureDrawFits(this.epoch));
     // A first round that already ruled is final once its reveal window
     // has passed: no more first-round reveals can land after the
     // deadline, so its majority cannot change. A close under appeal
@@ -857,16 +890,22 @@ export class SimCourt {
     const firstRoundFinal = dispute.drawn && this.epoch > dispute.revealDeadline;
     // A draw that never executed can never execute once its
     // reschedules are spent and its final locked epoch has passed. The
-    // dispute then closes the same way instead of staying frozen.
+    // dispute then closes the same way instead of staying frozen. A
+    // draw whose reschedule can never be scheduled closes the same
+    // way even with reschedules left: when the current epoch plus one
+    // leaves no room for a voting horizon, no reschedule can be
+    // accepted, so waiting for the reschedule count to run out would
+    // freeze the dispute.
     const neverDrawn =
       !dispute.drawn &&
-      dispute.reschedules >= MAX_RESCHEDULES &&
-      this.epoch > dispute.drawEpoch;
+      this.epoch > dispute.drawEpoch &&
+      (dispute.reschedules >= MAX_RESCHEDULES || !futureDrawFits(this.epoch));
     const appealNeverDrawn =
       dispute.appealed &&
       !dispute.appealDrawn &&
-      dispute.appealReschedules >= MAX_RESCHEDULES &&
-      this.epoch > dispute.appealDrawEpoch;
+      this.epoch > dispute.appealDrawEpoch &&
+      (dispute.appealReschedules >= MAX_RESCHEDULES ||
+        !futureDrawFits(this.epoch));
     const firstNoMajority = this.firstOutcome(dispute).vote === null;
     const appealNoMajority = this.appealOutcome(dispute).vote === null;
     if (dispute.appealed) {

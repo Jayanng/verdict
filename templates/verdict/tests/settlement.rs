@@ -3266,3 +3266,181 @@ fn appeal_close_slashes_first_round_failed_jurors() {
     }
     assert_eq!(total_claim, 2 * JUROR_FEE);
 }
+
+fn open_dispute_with_delay(setup: &mut Setup, signer: &RistrettoSecretKey, delay: u64) -> u64 {
+    let verdict = setup.verdict;
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "open_dispute", args![setup.escrow, delay])
+            .build_and_seal(signer),
+        vec![],
+    );
+    setup.test.expect_return(0)
+}
+
+/// A draw delay that puts the draw epoch at the top of the range is
+/// refused: the draw would fail on its reveal deadline, the reschedule
+/// could never run, and the close could never run, freezing the escrow.
+/// The latest usable draw epoch, three below the top, still opens and
+/// draws.
+#[test]
+fn draw_epoch_at_top_of_range_rejected() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let _jurors = register_jurors(&mut setup, 3);
+    let payer_secret = setup.payer.secret.clone();
+    let verdict = setup.verdict;
+    // The dispute opens at epoch 10, so a delay of u64::MAX - 10 puts
+    // the draw epoch at u64::MAX.
+    set_epoch(&mut setup.test, 10);
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "open_dispute", args![setup.escrow, u64::MAX - 10])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "draw epoch leaves no room for the voting windows");
+    // Three below the top leaves room for the reveal deadline and the
+    // epoch strictly after it, so the dispute opens and draws.
+    let dispute_id = open_dispute_with_delay(&mut setup, &payer_secret, u64::MAX - 13);
+    let draw_epoch: u64 = setup.test.call_method(
+        setup.verdict,
+        "dispute_draw_epoch",
+        args![dispute_id],
+        vec![],
+    );
+    assert_eq!(draw_epoch, u64::MAX - 3);
+    set_epoch(&mut setup.test, draw_epoch);
+    set_epoch_hash(&mut setup.test, hash_of(0xE2));
+    setup.test.execute_expect_success(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "draw_jury", args![dispute_id])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    let reveal_deadline: u64 = setup.test.call_method(
+        setup.verdict,
+        "dispute_reveal_deadline",
+        args![dispute_id],
+        vec![],
+    );
+    assert_eq!(reveal_deadline, u64::MAX - 1);
+}
+
+/// A dispute whose draw epoch passed closes even with reschedules
+/// left, when no reschedule can be scheduled: the current epoch plus
+/// one leaves no room for a voting horizon, so waiting for the
+/// reschedule count to run out would freeze the dispute.
+#[test]
+fn undrawn_dispute_closes_when_no_reschedule_can_be_scheduled() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let _jurors = register_jurors(&mut setup, 3);
+    let payer_secret = setup.payer.secret.clone();
+    let verdict = setup.verdict;
+    let payer_before = balance(&mut setup.test, &setup.payer);
+    set_epoch(&mut setup.test, 10);
+    let dispute_id = open_dispute_with_delay(&mut setup, &payer_secret, u64::MAX - 13);
+    // The draw epoch is u64::MAX - 3. Once it passes with no draw, a
+    // reschedule would put the new draw at u64::MAX - 1, whose reveal
+    // deadline plus one overflows, so the reschedule is refused.
+    set_epoch(&mut setup.test, u64::MAX - 2);
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "reschedule_draw", args![dispute_id])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "draw epoch leaves no room for the voting windows");
+    // The close runs anyway: no reschedule can ever be scheduled.
+    close_no_ruling(&mut setup, &payer_secret, dispute_id);
+    assert_eq!(balance(&mut setup.test, &setup.payer), payer_before + TOTAL);
+    assert_eq!(vault_balance(&mut setup), 0);
+    assert_eq!(dispute_fees_paid(&mut setup, dispute_id), 0);
+}
+
+/// An incomplete round closes even with its replacement unused, when
+/// no replacement draw can be scheduled: the current epoch leaves no
+/// room for a voting horizon, so waiting for a replacement would
+/// freeze the dispute. While a replacement is still schedulable, the
+/// close stays refused.
+#[test]
+fn incomplete_round_closes_when_no_replacement_can_be_scheduled() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 3);
+    let payer_secret = setup.payer.secret.clone();
+    let verdict = setup.verdict;
+    let payer_before = balance(&mut setup.test, &setup.payer);
+    let dispute_id = open_dispute(&mut setup, &payer_secret);
+    let panel = draw_panel(&mut setup, dispute_id);
+    // One juror reveals, so the round has no majority and is not fully
+    // revealed. The other two never reveal.
+    let first = jurors
+        .iter()
+        .find(|j| j.pk_bytes() == panel[0])
+        .expect("drawn juror not found");
+    let salt = hash_of(1);
+    let commitment = vote_commitment(VOTE_PAY, salt, dispute_id, panel[0]);
+    commit_vote(&mut setup, first, dispute_id, commitment);
+    let deadline = reveal_deadline(&mut setup, dispute_id);
+    set_epoch(&mut setup.test, deadline);
+    reveal_vote(&mut setup, first, dispute_id, VOTE_PAY, salt);
+    // One epoch past the deadline a replacement can still be scheduled,
+    // so the close is refused.
+    set_epoch(&mut setup.test, deadline + 1);
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(verdict, "close_no_ruling", args![dispute_id])
+            .build_and_seal(&payer_secret),
+        vec![],
+    );
+    assert_reject_reason(&reason, "first round can still reach a ruling");
+    // At the top of the range no replacement draw fits, so the close runs.
+    set_epoch(&mut setup.test, u64::MAX);
+    close_no_ruling(&mut setup, &payer_secret, dispute_id);
+    assert_eq!(balance(&mut setup.test, &setup.payer), payer_before + TOTAL);
+    assert_eq!(vault_balance(&mut setup), 0);
+}
+
+/// An appeal draw delay that puts the appeal draw epoch at the top of
+/// the range is refused the same way as a first-round delay.
+#[test]
+fn appeal_draw_epoch_at_top_of_range_rejected() {
+    let mut setup = make_setup();
+    fund(&mut setup, TOTAL);
+    let jurors = register_jurors(&mut setup, 7);
+    let (dispute_id, _panel) =
+        dispute_with_ruling(&mut setup, &jurors, &[VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    let verdict = setup.verdict;
+    let appellant = setup.payer.clone();
+    let appellant_secret = appellant.secret.clone();
+    let appellant_account = appellant.account;
+    let appellant_proof = appellant.proof.clone();
+    set_epoch(&mut setup.test, 10);
+    let reason = setup.test.execute_expect_failure(
+        setup
+            .test
+            .transaction()
+            .call_method(appellant_account, "withdraw", args![TARI_TOKEN, APPEAL_FEE])
+            .put_last_instruction_output_on_workspace("appeal_fee")
+            .call_method(
+                verdict,
+                "open_appeal",
+                args![dispute_id, u64::MAX - 10, Workspace("appeal_fee")],
+            )
+            .build_and_seal(&appellant_secret),
+        vec![appellant_proof],
+    );
+    assert_reject_reason(&reason, "draw epoch leaves no room for the voting windows");
+}

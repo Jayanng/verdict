@@ -57,6 +57,20 @@ ruling instead of staying frozen: the whole principal returns to the
 payer, no juror fee is taken, and any appeal fee returns in full. The
 same rule applies to an appeal draw that never executes.
 
+A draw epoch is accepted only when the whole voting horizon fits after
+it: the reveal deadline is the draw epoch plus two epochs, and
+finalization runs strictly after that deadline, so one more epoch must
+be representable too. Every draw schedule is checked this way, the
+opening draw, each replacement, each appeal draw, and each reschedule,
+before the schedule is committed. A delay that would put the draw epoch
+at the top of the range is refused, so no accepted schedule can leave a
+dispute whose draw fails on its deadline, whose reschedule can never run,
+and whose close can never run. When no future draw can be scheduled at
+all, because the current epoch plus one leaves no room for a voting
+horizon, the close runs anyway: a draw that never executed closes even
+with reschedules left, and an incomplete round closes even with its
+replacement unused, instead of waiting for a draw that can never come.
+
 The panel derivation hashes the draw domain with the draw hash, the
 round nonce, the dispute id, and the slot: for each slot, SHA-256 over
 (draw hash, domain, round, dispute id, slot), the first eight bytes
@@ -229,7 +243,12 @@ appeal round is already done.
 A dispute whose draw never executed closes the same way once its
 reschedules are spent and its final locked epoch has passed: the draw can
 never execute after that, so there is no ruling to wait for. The same
-applies to an appeal draw that never executes. The close needs no panel,
+applies to an appeal draw that never executes. It also closes when no
+future draw can be scheduled at all, even with reschedules left: if the
+current epoch plus one leaves no room for a voting horizon, no reschedule
+can be accepted, so the dispute exits instead of waiting for one that can
+never come. An incomplete round closes the same way when its replacement
+can never be scheduled. The close needs no panel,
 no votes, and no juror fee: the whole principal returns to the payer and
 any appeal fee returns in full.
 

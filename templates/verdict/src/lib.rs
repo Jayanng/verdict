@@ -287,6 +287,14 @@ mod verdict {
             let draw_epoch = open_epoch
                 .checked_add(draw_delay)
                 .expect("draw delay overflows epoch range");
+            // The draw epoch must leave room for the whole voting
+            // horizon, checked before the escrow freezes: a draw at
+            // the top of the range could never execute, never
+            // reschedule, and never close, freezing the escrow.
+            assert!(
+                Self::draw_horizon_fits(draw_epoch),
+                "draw epoch leaves no room for the voting windows"
+            );
             // Freeze the eligible pool now: jurors who register after
             // the dispute opens are not eligible for this dispute.
             let eligible_pool: Vec<RistrettoPublicKeyBytes> =
@@ -459,6 +467,10 @@ mod verdict {
             dispute.draw_epoch = Consensus::current_epoch()
                 .checked_add(1)
                 .expect("draw epoch overflow");
+            assert!(
+                Self::draw_horizon_fits(dispute.draw_epoch),
+                "draw epoch leaves no room for the voting windows"
+            );
             dispute.reschedules = dispute
                 .reschedules
                 .checked_add(1)
@@ -519,6 +531,10 @@ mod verdict {
             dispute.draw_epoch = now
                 .checked_add(draw_delay)
                 .expect("draw delay overflows epoch range");
+            assert!(
+                Self::draw_horizon_fits(dispute.draw_epoch),
+                "draw epoch leaves no room for the voting windows"
+            );
             dispute.draw_hash = Hash32::from([0u8; 32]);
             dispute.drawn = false;
             dispute.round = dispute.round.checked_add(1).expect("draw round overflow");
@@ -925,6 +941,10 @@ mod verdict {
             dispute.appeal_draw_epoch = now
                 .checked_add(draw_delay)
                 .expect("appeal draw delay overflows epoch range");
+            assert!(
+                Self::draw_horizon_fits(dispute.appeal_draw_epoch),
+                "draw epoch leaves no room for the voting windows"
+            );
             dispute.appeal_draw_hash = Hash32::from([0u8; 32]);
             dispute.appeal_drawn = false;
             dispute.appeal_round = 0;
@@ -1002,6 +1022,10 @@ mod verdict {
             dispute.appeal_draw_epoch = Consensus::current_epoch()
                 .checked_add(1)
                 .expect("appeal draw epoch overflow");
+            assert!(
+                Self::draw_horizon_fits(dispute.appeal_draw_epoch),
+                "draw epoch leaves no room for the voting windows"
+            );
             dispute.appeal_reschedules = dispute
                 .appeal_reschedules
                 .checked_add(1)
@@ -1133,6 +1157,10 @@ mod verdict {
             dispute.appeal_draw_epoch = now
                 .checked_add(draw_delay)
                 .expect("appeal draw delay overflows epoch range");
+            assert!(
+                Self::draw_horizon_fits(dispute.appeal_draw_epoch),
+                "draw epoch leaves no room for the voting windows"
+            );
             dispute.appeal_draw_hash = Hash32::from([0u8; 32]);
             dispute.appeal_drawn = false;
             dispute.appeal_round = dispute
@@ -1190,14 +1218,22 @@ mod verdict {
                 // of staying frozen. A full reveal alone is not
                 // enough: finalization runs strictly after the
                 // reveal deadline, never in the deadline epoch,
-                // so no juror's timely reveal can be cut off.
+                // so no juror's timely reveal can be cut off. A
+                // round whose replacement can never be scheduled
+                // is finished too: when the current epoch plus one
+                // leaves no room for a voting horizon, no
+                // replacement draw can be accepted, so waiting for
+                // one would freeze the dispute.
                 let round_finished = dispute.drawn
                     && now > dispute.reveal_deadline
-                    && (dispute.reveals.len() == dispute.panel.len() || dispute.replacement_used);
+                    && (dispute.reveals.len() == dispute.panel.len()
+                        || dispute.replacement_used
+                        || !Self::future_draw_fits(now));
                 let appeal_finished = dispute.appeal_drawn
                     && now > dispute.appeal_reveal_deadline
                     && (dispute.appeal_reveals.len() == dispute.appeal_panel.len()
-                        || dispute.appeal_replacement_used);
+                        || dispute.appeal_replacement_used
+                        || !Self::future_draw_fits(now));
                 // A first round that already ruled is final once its
                 // reveal window has passed: no more first-round reveals
                 // can land after the deadline, so its majority cannot
@@ -1208,14 +1244,21 @@ mod verdict {
                 // A draw that never executed can never execute once
                 // its reschedules are spent and its final locked epoch
                 // has passed. The dispute then closes the same way
-                // instead of staying frozen forever.
+                // instead of staying frozen forever. A draw whose
+                // reschedule can never be scheduled closes the same
+                // way even with reschedules left: when the current
+                // epoch plus one leaves no room for a voting horizon,
+                // no reschedule can be accepted, so waiting for the
+                // reschedule count to run out would freeze the
+                // dispute.
                 let never_drawn = !dispute.drawn
-                    && dispute.reschedules >= MAX_RESCHEDULES
-                    && now > dispute.draw_epoch;
+                    && now > dispute.draw_epoch
+                    && (dispute.reschedules >= MAX_RESCHEDULES || !Self::future_draw_fits(now));
                 let appeal_never_drawn = dispute.appealed
                     && !dispute.appeal_drawn
-                    && dispute.appeal_reschedules >= MAX_RESCHEDULES
-                    && now > dispute.appeal_draw_epoch;
+                    && now > dispute.appeal_draw_epoch
+                    && (dispute.appeal_reschedules >= MAX_RESCHEDULES
+                        || !Self::future_draw_fits(now));
                 let first_no_majority =
                     Self::majority_outcome(&dispute.reveals, dispute.panel.len() as u64).is_none();
                 let appeal_no_majority = Self::majority_outcome(
@@ -1677,6 +1720,31 @@ mod verdict {
                 }
             }
             None
+        }
+
+        /// A draw epoch is usable only when the whole voting horizon
+        /// fits after it: the reveal deadline is the draw epoch plus
+        /// the reveal window, and finalization runs strictly after
+        /// that deadline, so one more epoch must be representable
+        /// too. A draw epoch at the top of the range would accept a
+        /// dispute whose draw fails on the deadline, whose reschedule
+        /// can never run, and whose missed-draw close can never run,
+        /// freezing the escrow forever.
+        fn draw_horizon_fits(draw_epoch: u64) -> bool {
+            draw_epoch
+                .checked_add(REVEAL_WINDOW)
+                .and_then(|deadline| deadline.checked_add(1))
+                .is_some()
+        }
+
+        /// A new draw from the current epoch is possible only when
+        /// the earliest new draw epoch, the current epoch plus one,
+        /// leaves room for the voting horizon. When it does not, no
+        /// reschedule or replacement draw can be accepted, and the
+        /// close must run instead of waiting for a draw that can never
+        /// come.
+        fn future_draw_fits(now: u64) -> bool {
+            now.checked_add(1).is_some_and(Self::draw_horizon_fits)
         }
 
         /// How many revealed votes are for the given outcome.

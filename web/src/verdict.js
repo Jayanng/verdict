@@ -36,6 +36,28 @@ export const VOTE_LABELS = {
   [VOTE_REFUSE]: "refuse to arbitrate",
 };
 
+// A draw epoch is usable only when the whole voting horizon fits
+// after it: the reveal deadline is the draw epoch plus the reveal
+// window, and finalization runs strictly after that deadline, so
+// one more epoch must be representable too. A draw epoch at the top
+// of the safe integer range would accept a dispute whose draw fails
+// on the deadline, whose reschedule can never run, and whose
+// missed-draw close can never run, freezing the escrow forever.
+// The sum stays exact: a draw epoch is a safe integer, so adding
+// three can only pass the safe range, never round inside it.
+export function drawHorizonFits(drawEpoch) {
+  return Number.isSafeInteger(drawEpoch + REVEAL_WINDOW + 1);
+}
+
+// A new draw from the current epoch is possible only when the
+// earliest new draw epoch, the current epoch plus one, leaves room
+// for the voting horizon. When it does not, no reschedule or
+// replacement draw can be accepted, and the close must run instead
+// of waiting for a draw that can never come.
+export function futureDrawFits(now) {
+  return Number.isSafeInteger(now + 1) && drawHorizonFits(now + 1);
+}
+
 export function hexToBytes(hex) {
   if (typeof hex !== "string") throw new Error("hex string must be a string");
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex;

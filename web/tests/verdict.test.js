@@ -29,6 +29,8 @@ import {
   u64ToLeBytes,
   voteCommitmentBytes,
   derivePanel,
+  drawHorizonFits,
+  futureDrawFits,
   majorityOutcome,
   settleAmounts,
   splitLargestRemainder,
@@ -429,6 +431,15 @@ describe("BigInt settlement amounts", () => {
       splitLargestRemainder(Number.MAX_SAFE_INTEGER, [2, 3, 1]),
       [3002399751580330, 4503599627370496, 1501199875790165],
     );
+  });
+
+  test("draw horizon fits only when the reveal deadline and the epoch after it fit", () => {
+    assert.equal(drawHorizonFits(Number.MAX_SAFE_INTEGER - 3), true);
+    assert.equal(drawHorizonFits(Number.MAX_SAFE_INTEGER - 2), false);
+    assert.equal(drawHorizonFits(Number.MAX_SAFE_INTEGER), false);
+    assert.equal(futureDrawFits(Number.MAX_SAFE_INTEGER - 4), true);
+    assert.equal(futureDrawFits(Number.MAX_SAFE_INTEGER - 3), false);
+    assert.equal(futureDrawFits(Number.MAX_SAFE_INTEGER), false);
   });
 
   test("a negative BigInt principal or weight is refused, not computed", () => {

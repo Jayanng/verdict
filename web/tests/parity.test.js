@@ -1899,3 +1899,87 @@ describe("round 3: caller, delays, epochs, atomic settlement, close rules", () =
     assert.equal(totalClaim, 2n * BigInt(JUROR_FEE));
   });
 });
+
+describe("draw horizon at the top of the epoch range", () => {
+  test("a draw delay that puts the draw epoch at the top of the safe range is rejected", () => {
+    const court = makeCourt(3);
+    court.setEpoch(10);
+    court.fund("payer", 1000000);
+    court.fund("payee", 0);
+    court.createEscrow("escrow-0", "payer", "payee", TOTAL);
+    // A delay of MAX_SAFE_INTEGER - 10 from epoch 10 puts the draw
+    // epoch at MAX_SAFE_INTEGER, where the reveal deadline and the
+    // epoch after it cannot be represented.
+    assert.throws(
+      () => court.openDispute("escrow-0", Number.MAX_SAFE_INTEGER - 10),
+      /draw epoch leaves no room for the voting windows/,
+    );
+    // Three below the top leaves room for the reveal deadline and the
+    // epoch strictly after it, so the dispute opens and draws.
+    const disputeId = court.openDispute("escrow-0", Number.MAX_SAFE_INTEGER - 13);
+    const dispute = court.dispute(disputeId);
+    assert.equal(dispute.drawEpoch, Number.MAX_SAFE_INTEGER - 3);
+    court.setEpoch(dispute.drawEpoch);
+    const { panel } = court.drawJury(disputeId);
+    assert.equal(panel.length, 3);
+    assert.equal(dispute.revealDeadline, Number.MAX_SAFE_INTEGER - 1);
+  });
+
+  test("an undrawn dispute closes when no reschedule can be scheduled", () => {
+    const court = makeCourt(3);
+    court.setEpoch(10);
+    court.fund("payer", 1000000);
+    court.fund("payee", 0);
+    court.createEscrow("escrow-0", "payer", "payee", TOTAL);
+    const disputeId = court.openDispute("escrow-0", Number.MAX_SAFE_INTEGER - 13);
+    // The draw epoch is MAX_SAFE_INTEGER - 3. Once it passes with no
+    // draw, a reschedule would put the new draw at MAX_SAFE_INTEGER - 1,
+    // whose reveal deadline plus one cannot be represented, so the
+    // reschedule is refused.
+    court.setEpoch(Number.MAX_SAFE_INTEGER - 2);
+    assert.throws(
+      () => court.rescheduleDraw(disputeId),
+      /draw epoch leaves no room for the voting windows/,
+    );
+    // The close runs anyway: no reschedule can ever be scheduled.
+    const payerBefore = court.balance("payer");
+    const result = court.closeNoRuling(disputeId);
+    assert.equal(result.payerAmount, BigInt(TOTAL));
+    assert.equal(court.balance("payer"), payerBefore + BigInt(TOTAL));
+    assert.equal(court.escrows.get("escrow-0").vault, 0n);
+  });
+
+  test("an incomplete round closes when no replacement can be scheduled", () => {
+    const court = makeCourt(3);
+    const disputeId = openFunded(court);
+    const { panel } = drawAt(court, disputeId);
+    // One juror reveals, so the round has no majority and is not fully
+    // revealed. The other two never reveal.
+    court.commitVote(disputeId, panel[0], VOTE_PAY, salt(0));
+    court.setEpoch(court.dispute(disputeId).revealDeadline);
+    court.revealVote(disputeId, panel[0], VOTE_PAY, salt(0));
+    // One epoch past the deadline a replacement can still be scheduled,
+    // so the close is refused.
+    court.setEpoch(court.dispute(disputeId).revealDeadline + 1);
+    assert.throws(
+      () => court.closeNoRuling(disputeId),
+      /first round can still reach a ruling/,
+    );
+    // At the top of the range no replacement draw fits, so the close runs.
+    court.setEpoch(Number.MAX_SAFE_INTEGER);
+    const payerBefore = court.balance("payer");
+    const result = court.closeNoRuling(disputeId);
+    assert.equal(result.payerAmount, BigInt(TOTAL));
+    assert.equal(court.balance("payer"), payerBefore + BigInt(TOTAL));
+  });
+
+  test("an appeal draw delay at the top of the safe range is rejected", () => {
+    const court = makeCourt();
+    const { disputeId } = disputeWithRuling(court, [VOTE_PAY, VOTE_PAY, VOTE_REFUND]);
+    court.setEpoch(10);
+    assert.throws(
+      () => court.openAppeal(disputeId, "payer", APPEAL_FEE, Number.MAX_SAFE_INTEGER - 10),
+      /draw epoch leaves no room for the voting windows/,
+    );
+  });
+});
